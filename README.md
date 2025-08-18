@@ -3,11 +3,11 @@
 **RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a Large Language Model (LLM) operate your desktop by looking at screenshots and emitting single, atomic actions (keyboard, mouse, scroll, etc.).
 
 * Best results so far with **`gpt-5`**; older models can be **faster**, but are usually less reliable.
-* Designed for **Windows 10/11 (x64)**. .NET **9** is recommended.
+* Designed for **Windows 10/11 (x64)**. .NET **9** is required.
 
 > ⚠️ By default the **mouse is disabled** because current models still struggle with precise targeting of on‑screen elements. Keyboard‑first strategies are encouraged. You can enable the mouse with a flag or env var (see below).
 
-> ⚠️ BCurrently RDPilot captures and operates only the primary display (primary monitor).
+> ⚠️ Currently RDPilot captures and operates only the primary display (primary monitor).
 
 ---
 
@@ -25,7 +25,7 @@
 Give the model a high‑level goal and it will iteratively act on your desktop. For example:
 
 ```
-open Edge, go to Google.com, and search for the term 'życie'
+open Edge, go to Google.com, and search for the term 'life'
 ```
 
 It also supports “Q\&A on screenshot” via `/ask`, e.g.:
@@ -84,12 +84,12 @@ You can pass a **single goal** as an argument, or start with no args to use **in
 
 ```bash
 # one‑shot goal
-RDPilot.exe "open Edge, go to Google.com, and search for the term 'życie'"
+RDPilot.exe "open Edge, go to Google.com, and search for the term 'life'"
 
 # interactive mode
 RDPilot.exe
 # then type goals or Q&A like:
-#   open Edge, go to Google.com, and search for the term 'życie'
+#   open Edge, go to Google.com, and search for the term 'life'
 #   /ask where do you see the Edge app icon?
 ```
 
@@ -122,7 +122,7 @@ RDPilot.exe
 ### Task (control loop)
 
 ```
-open Edge, go to Google.com, and search for the term 'życie'
+open Edge, go to Google.com, and search for the term 'life'
 ```
 
 ### Q\&A (screenshot analysis)
