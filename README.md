@@ -39,12 +39,8 @@ It also supports “Q\&A on screenshot” via `/ask`, e.g.:
 
 1. **Capture** the primary screen as a PNG. A white+red rounded focus ring (from UI Automation) overlays the element that currently has keyboard focus. An optional pixel **grid overlay** can assist with precise coordinates.
 2. **Prompt & call** the LLM (default `gpt-5`) with strict JSON schema: the model must return **exactly one** action per round (`keys`, `type_text`, `move`, `click`, `double_click`, `scroll`, `request_crop`, `point`, `aim`, `wait`, `done`).
-3. **Policy gates** are enforced:
-
-   * **Aim‑before‑click**: a `click/double_click` is ignored unless an `aim` defined the target region first. Clicks must provide **explicit coordinates** (`x/y` or `x_px/y_px`) that fall **inside** the active AIM.
-   * **AIM expiration**: after a large visual change (`LAST_STEP_DELTA > AimExpireDelta`), the previous AIM is invalidated and must be set again.
-   * Prefer deterministic, **keyboard‑first** strategies. Mouse may be disabled.
-4. **Execute** via WinAPI (SendInput), wait a short **UI settle delay**, then loop until the goal is reached or step limits are hit.
+3. **Execute** action via WinAPI (SendInput)
+4. **Loop** until the goal is reached.
 
 > The app writes **logs to files**: screenshots, crops/overlays, and request/response JSONs (see *Output & logs*).
 
