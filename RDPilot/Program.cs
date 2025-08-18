@@ -44,8 +44,6 @@ internal class RDPilot
 
     // Stagnation / verification
     const double NoChangeThreshold = 0.005;             // 0..1 (avg pixel diff after downsampling)
-    const int StallPatience = 3;                        // after N no-change steps → ask for different strategy
-    const int RepeatPatience = 3;                       // repeating same action N times → ask to change approach
 
 
     static readonly JsonSerializerOptions PrettyJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -359,9 +357,6 @@ internal class RDPilot
                     .AppendLine($"REPEAT_COUNT: {repeatCount}")
                     .AppendLine($"LAST_ACTION: {(prevAction == null ? "N/A" : Describe(prevAction))}")
                     .AppendLine($"AIM_ACTIVE: {(lastAimRect is null ? "false" : $"true [{lastAimRect.Value.Left},{lastAimRect.Value.Top}]–[{lastAimRect.Value.Right},{lastAimRect.Value.Bottom}]")}");
-
-                if (stagnationSteps >= StallPatience) metaSb.AppendLine("STALL_HINT: no visible change—try a different strategy than before.");
-                if (repeatCount >= RepeatPatience) metaSb.AppendLine("REPEAT_HINT: do not repeat the same action; use a different approach (e.g., keyboard).");
 
                 var reqBody = BuildRequestBody(Model, systemRules, goal, historyTail + "\n" + metaSb, dataUrl, screenW, screenH,
                                                cx, cy, cnx, cny, focusUrl, appliedFocusRect, focusUiaRect, focusUiaDataUrl);
