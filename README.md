@@ -27,7 +27,7 @@ Give the model a high‑level goal and it will iteratively act on your desktop. 
 ```
 open Edge browser, go to Google.com, and search for the term 'life'
 ```
-```
+
 ---
 
 ## How it works (high level)
@@ -98,12 +98,17 @@ Logs are stored in the following folders:
 
 ## Running
 
+You can pass a **single goal** as an argument, or start with no args to use **interactive mode**.
+
 ```bash
 # interactive mode
 RDPilot.exe
 # then type goals or Q&A like:
 #   open Edge browser, go to Google.com, and search for the term 'life'
 #   /ask where do you see the Edge app icon?
+
+# one‑shot goal
+RDPilot.exe "open Edge browser, go to Google.com, and search for the term 'life'"
 ```
 
 **Abort** the current run anytime with **Ctrl+Alt+Q** (when the console has focus).
