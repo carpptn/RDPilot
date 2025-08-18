@@ -66,11 +66,12 @@ All artifacts are stored next to the executable:
 ## Setup
 
 1. Install the **.NET 9** SDK or runtime.
-2. Set your OpenAI API key:
+2. Install the **.NET 9** Desktop Runtime (Windows Desktop Runtime).
+3. Set your OpenAI API key:
 
    * PowerShell: `setx OPENAI_API_KEY "sk-..."`
    * Or export in your shell/session.
-3. Build or run:
+4. Build or run:
 
    * Build: `dotnet build -c Release`
    * Run:   `dotnet run --project .`  (or execute your built `.exe`)
@@ -107,7 +108,7 @@ RDPilot.exe
 
 ---
 
-## Notes on coordinates & targeting
+## Notes on coordinates & targeting (mouse)
 
 * **`x/y`** are **normalized** (0..1) coordinates relative to the primary screen.
 * **`x_px/y_px`** are **absolute pixels**.
