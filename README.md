@@ -1,6 +1,6 @@
 ﻿# RDPilot — AI‑Controlled Desktop Agent (Experimental)
 
-**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a Large Language Model (LLM) operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
+**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a AI operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
 
 * Best results so far with **`gpt-5`**; older models can be **faster**, but are usually less reliable.
 * Designed for **Windows 10/11**, .NET **9** is required.
