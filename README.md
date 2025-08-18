@@ -135,7 +135,6 @@ open Edge browser, go to Google.com, and search for the term 'life'
 This is an **experimental** project built for exploration and learning. It simulates real input on your machine and may act unpredictably (mis‑clicks, wrong targets, etc.).
 
 * Use on a **throwaway VM** or a non‑critical environment when possible.
-* Review and sandbox tasks.
 * You run it **at your own risk**. No warranty of any kind.
 
 ---
