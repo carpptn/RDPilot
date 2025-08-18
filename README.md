@@ -11,6 +11,15 @@
 
 ---
 
+## Requirements
+
+* **Windows 10/11 (x64)**
+* **.NET 9** runtime or SDK (**recommended**)
+* **.NET 9.0 Desktop Runtime (Windows Desktop Runtime)**
+* Network access to `api.openai.com`
+
+---
+
 ## What can it do?
 
 Give the model a high‑level goal and it will iteratively act on your desktop. For example:
@@ -24,7 +33,6 @@ It also supports “Q\&A on screenshot” via `/ask`, e.g.:
 ```
 /ask where do you see the Edge app icon?
 ```
-
 ---
 
 ## How it works (high level)
@@ -52,14 +60,6 @@ All artifacts are stored next to the executable:
   JSON **request/response** payloads per step (`*_request.json`, `*_response.json`) + verifier requests when the model returns `done`.
 * **`/logs`**
   A per‑run **console log** (`<id>.log`) that mirrors what you see in the terminal.
-
----
-
-## Requirements
-
-* **Windows 10/11 (x64)**
-* **.NET 9** runtime or SDK (**recommended**)
-* Network access to `api.openai.com`
 
 ---
 
