@@ -22,7 +22,7 @@
 
 ## What can it do?
 
-Give the model a high‑level goal and it will iteratively act on your desktop. For example:
+Give the model a goal and it will iteratively act on your desktop. For example:
 
 ```
 open Edge browser, go to Google.com, and search for the term 'life'
@@ -30,7 +30,7 @@ open Edge browser, go to Google.com, and search for the term 'life'
 
 ---
 
-## How it works (high level)
+## How it works
 
 **1. Task Retrieval (Prompt)**  
 The application first retrieves a **prompt** that defines the goal to be achieved (the task description for the model).  
