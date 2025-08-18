@@ -37,17 +37,17 @@ It also supports “Q\&A on screenshot” via `/ask`, e.g.:
 
 ## How it works (high level)
 
-**1. Task Retrieval (Prompt)**
+**1. Task Retrieval (Prompt)**  
 The application first retrieves a **prompt** that defines the goal to be achieved (the task description for the model).  
 
-**2. Initial Screenshot & Model Input**
+**2. Initial Screenshot & Model Input**  
 A screenshot (PNG) of the primary screen is captured.  
 - A **white + red rounded focus ring** (from UI Automation) highlights the element that currently has keyboard focus.  
 - An **optional pixel grid overlay** may be added to assist with precise coordinate selection.  
 
 This screenshot, along with the task prompt, is then sent to the LLM.  
 
-**3. Model Decision**
+**3. Model Decision**  
 The LLM (e.g., GPT-5) responds with **exactly one action** to be executed, following a strict JSON schema.  
 The available actions include:  
 - `keystype_text`  
@@ -61,10 +61,10 @@ The available actions include:
 - `wait`  
 - `done`  
 
-**4. Action Execution**
+**4. Action Execution**  
 The application executes the given action via **WinAPI (SendInput)**.  
 
-**5. Iterative Loop**
+**5. Iterative Loop**  
 After execution, a new screenshot is generated and sent back to the model.  
 The model decides the next action.  
 This process repeats in a loop until the model returns the `done` action, which signals that the initial task goal (from the prompt) has been achieved.  
