@@ -62,7 +62,7 @@ The available actions include:
 - `done`  
 
 **4. Action Execution**  
-The application executes the given action via **WinAPI (SendInput)**.  
+The application executes the given action via **WinAPI**.  
 
 **5. Iterative Loop**  
 After execution, a new screenshot is generated and sent back to the model.  
@@ -75,7 +75,7 @@ This process repeats in a loop until the model returns the `done` action, which 
 
 ## Output & logs
 
-All artifacts are stored next to the executable:
+Logs are stored in the following folders:
 
 * **`/screens`**
   Full screenshots (`<id>_<step>.png`), optional **crop** images, **focus\_uia** crops, and **aim\_overlay** images.
