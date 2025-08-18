@@ -1,6 +1,6 @@
 ﻿# RDPilot — AI‑Controlled Desktop Agent (Experimental)
 
-**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a Large Language Model (LLM) operate your desktop by looking at screenshots and emitting single, atomic actions (keyboard, mouse, scroll, etc.).
+**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a Large Language Model (LLM) operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
 
 * Best results so far with **`gpt-5`**; older models can be **faster**, but are usually less reliable.
 * Designed for **Windows 10/11 (x64)**. .NET **9** is required.
@@ -106,14 +106,14 @@ All artifacts are stored next to the executable:
 You can pass a **single goal** as an argument, or start with no args to use **interactive mode**.
 
 ```bash
-# one‑shot goal
-RDPilot.exe "open Edge, go to Google.com, and search for the term 'life'"
-
 # interactive mode
 RDPilot.exe
 # then type goals or Q&A like:
 #   open Edge, go to Google.com, and search for the term 'life'
 #   /ask where do you see the Edge app icon?
+
+# one‑shot goal
+RDPilot.exe "open Edge, go to Google.com, and search for the term 'life'"
 ```
 
 **Abort** the current run anytime with **Ctrl+Alt+Q** (when the console has focus).
