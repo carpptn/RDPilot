@@ -16,7 +16,7 @@
 * **Windows 10/11 (x64)**
 * **.NET 9** runtime or SDK (**recommended**)
 * **.NET 9.0 Desktop Runtime (Windows Desktop Runtime)**
-* Network access to `api.openai.com`
+* OpenAI API KEY
 
 ---
 
