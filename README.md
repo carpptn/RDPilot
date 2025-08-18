@@ -25,13 +25,8 @@
 Give the model a high‑level goal and it will iteratively act on your desktop. For example:
 
 ```
-open Edge, go to Google.com, and search for the term 'life'
+open Edge browser, go to Google.com, and search for the term 'life'
 ```
-
-It also supports “Q\&A on screenshot” via `/ask`, e.g.:
-
-```
-/ask where do you see the Edge app icon?
 ```
 ---
 
@@ -107,7 +102,7 @@ Logs are stored in the following folders:
 # interactive mode
 RDPilot.exe
 # then type goals or Q&A like:
-#   open Edge, go to Google.com, and search for the term 'life'
+#   open Edge browser, go to Google.com, and search for the term 'life'
 #   /ask where do you see the Edge app icon?
 ```
 
@@ -140,7 +135,7 @@ RDPilot.exe
 ### Task (control loop)
 
 ```
-open Edge, go to Google.com, and search for the term 'life'
+open Edge browser, go to Google.com, and search for the term 'life'
 ```
 
 ### Q\&A (screenshot analysis)
