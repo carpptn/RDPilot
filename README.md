@@ -99,7 +99,7 @@ Logs are stored in the following folders:
 
 ## Abort Run
 
-**Abort** the current run anytime with **Ctrl+Alt+Q** (when the console has focus).
+**Abort** the current run anytime with **Ctrl+Alt+Q**.
 
 ---
 
