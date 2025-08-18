@@ -145,3 +145,6 @@ This is an **experimental** project built for exploration and learning. It simul
 ## License
 
 MIT.
+
+If you improve this code, I’ll be happy to accept the changes in a PR :)
+
