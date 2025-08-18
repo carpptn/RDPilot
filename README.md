@@ -114,15 +114,6 @@ Logs are stored in the following folders:
 
 ---
 
-## Notes on coordinates & targeting (mouse)
-
-* **`x/y`** are **normalized** (0..1) coordinates relative to the primary screen.
-* **`x_px/y_px`** are **absolute pixels**.
-* When clicking inside an **AIM** region, the model must provide explicit coordinates (`x/y` or `x_px/y_px`) **inside** that region. If coordinates are missing or outside AIM, the app ignores the click.
-* If the **grid** is enabled, use it to read exact pixel positions.
-
----
-
 ## Examples
 
 ### Task (control loop)
