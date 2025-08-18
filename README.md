@@ -82,7 +82,8 @@ All artifacts are stored next to the executable:
 You can pass a **single goal** as an argument, or start with no args to use **interactive mode**.
 
 ```bash
-# one‑shot goal\ nRDPilot.exe "open Edge, go to Google.com, and search for the term 'życie'"
+# one‑shot goal
+RDPilot.exe "open Edge, go to Google.com, and search for the term 'życie'"
 
 # interactive mode
 RDPilot.exe
@@ -103,7 +104,6 @@ RDPilot.exe
 | Enable mouse actions       | `MOUSE_ENABLED=1/true/yes` | `--mouse`         | Default **off** (aiming is unreliable) |                                                     |
 | Post‑action UI delay (ms)  | `POST_ACTION_DELAY_MS=###` | `--delay <ms>`    | Default `1000`                         |                                                     |
 | Pixel grid overlay         | `GRID_STEP_PX=###` or `0`  | \`--grid \<px     | off>\`                                 | e.g. `100` for 100‑px grid; `off` or `0` to disable |
-| Keep console window on top | `ALWAYS_ON_TOP=1`          | `--always-on-top` | Optional convenience                   |                                                     |
 
 ---
 
