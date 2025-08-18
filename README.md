@@ -7,7 +7,7 @@
 
 > ⚠️ By default the **mouse is disabled** because current models still struggle with precise targeting of on‑screen elements. Keyboard‑first strategies are encouraged. You can enable the mouse with a flag or env var (see below).
 
-> ⚠️ Currently RDPilot captures and operates only the primary display (primary monitor).
+> ⚠️ Currently RDPilot captures and operates only the primary display.
 
 ---
 
