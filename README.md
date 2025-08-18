@@ -45,7 +45,8 @@ This screenshot, along with the task prompt, is then sent to the LLM.
 **3. Model Decision**  
 The LLM (e.g., GPT-5) responds with **exactly one action** to be executed, following a strict JSON schema.  
 The available actions include:  
-- `keystype_text`  
+- `keys`  
+- `type_text`  
 - `move`  
 - `click`  
 - `double_click`  
