@@ -3,7 +3,7 @@
 **RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a Large Language Model (LLM) operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
 
 * Best results so far with **`gpt-5`**; older models can be **faster**, but are usually less reliable.
-* Designed for **Windows 10/11 (x64)**. .NET **9** is required.
+* Designed for **Windows 10/11**, .NET **9** is required.
 
 > ⚠️ By default the **mouse is disabled** because current models still struggle with precise targeting of on‑screen elements. Keyboard‑first strategies are encouraged. You can enable the mouse with a flag or env var (see below).
 
@@ -13,7 +13,7 @@
 
 ## Requirements
 
-* **Windows 10/11 (x64)**
+* **Windows 10/11**
 * **.NET 9** runtime or SDK (**recommended**)
 * **.NET 9.0 Desktop Runtime (Windows Desktop Runtime)**
 * OpenAI API KEY
