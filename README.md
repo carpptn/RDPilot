@@ -110,7 +110,7 @@ Logs are stored in the following folders:
 | OpenAI API key             | `OPENAI_API_KEY`           | —                 | **Required**                           |                                                     |
 | Enable mouse actions       | `MOUSE_ENABLED=1/true/yes` | `--mouse`         | Default **off** (aiming is unreliable) |                                                     |
 | Post‑action UI delay (ms)  | `POST_ACTION_DELAY_MS=###` | `--delay <ms>`    | Default `1000`                         |                                                     |
-| Pixel grid overlay         | `GRID_STEP_PX=###` or `0`  | \`--grid \<px     | off>\`                                 | e.g. `100` for 100‑px grid; `off` or `0` to disable |
+| Pixel grid overlay         | `GRID_STEP_PX=###` or `0`  | `--grid <px>`     | Default **off**                        | e.g. `100` for 100‑px grid; `off` or `0` to disable |
 
 ---
 
