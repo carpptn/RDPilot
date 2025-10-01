@@ -186,11 +186,7 @@ internal class RDPilot
         s = s.Trim();
         if (s.StartsWith("/ask ", StringComparison.OrdinalIgnoreCase)) return true;
         if (s.EndsWith("?")) return true;
-
-        var q = s.ToLowerInvariant();
-        string[] whEn = { "what ", "how ", "when ", "where ", "is ", "are ", "do ", "does ", "did ", "why ", "who ", "which ", "can ", "could ", "would ", "should ", "how many ", "how much " };
-        string[] whPl = { "co ", "jak ", "kiedy ", "gdzie ", "czy ", "ile ", "dlaczego ", "po co ", "kto ", "który", "która", "jakie ", "jaki " };
-        return whEn.Any(p => q.StartsWith(p)) || whPl.Any(p => q.StartsWith(p));
+        return false;
     }
 
     // === Q&A ===
