@@ -13,13 +13,13 @@ using System.Windows.Automation;
 internal class RDPilot
 {
     // === CONFIG ===
-    const string Model = "gpt-5";                       // e.g., gpt-4o-mini, gpt-4o, gpt-5
+    const string Model = "gpt-5.5";                       // e.g., gpt-4o-mini, gpt-4o, gpt-5
     const string ApiUrl = "https://api.openai.com/v1/responses";
     
     const int MaxStepsDefault = 10000;
 
     // Mouse: enable/disable (default DISABLED here)
-    static bool MouseEnabled = false;
+    static bool MouseEnabled = true;
 
     // Global, configurable time to let UI "settle" after an action before taking the next screenshot
     static int UiSettleDelayMs = 1000;                  // can override via POST_ACTION_DELAY_MS or --delay <ms>
