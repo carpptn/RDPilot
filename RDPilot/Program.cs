@@ -18,7 +18,7 @@ internal static partial class RDPilotApplication
     const int MaxStepsDefault = 10000;
     static int MaxSteps = MaxStepsDefault;
 
-    // Mouse: enable/disable (default enabled for GPT-5.5 vision/control quality)
+    // Mouse: enable/disable (default enabled for GPT-5.6-terra vision/control quality)
     static bool MouseEnabled = true;
 
     // Global, configurable time to let UI "settle" after an action before taking the next screenshot
@@ -181,6 +181,7 @@ internal static partial class RDPilotApplication
     static async Task Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+        ConsoleTheme.Enable();
 
         ApplyEnvironmentConfig();
         string? pending = ApplyCliArgs(args);
@@ -228,10 +229,8 @@ internal static partial class RDPilotApplication
 
         try { SetProcessDpiAwarenessContext((nint)(-4)); } catch { /* best effort */ }
 
-        Console.WriteLine("Interactive mode. Enter commands or questions.");
-        Console.WriteLine("Empty input or '/exit' will quit. Prefix '/ask ' forces Q&A mode.");
-        PrintEffectiveConfig();
-        Console.WriteLine("Emergency abort while running: Ctrl+Alt+Q\n");
+        PrintStartupSummary();
+        Console.WriteLine("Enter a task or question. Use '/ask ' for Q&A and '/exit' to quit.\n");
 
         while (true)
         {

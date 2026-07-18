@@ -26,6 +26,16 @@ internal static partial class RDPilotApplication
                 Console.WriteLine($"UIA targets: {(IncludeUiaTargets ? $"on/{MaxUiaTargets}; name_chars={UiaTargetNameMaxChars}; summary_chars={UiaSummaryMaxChars}; scan={UiaScanTimeBudgetMs}ms/{MaxUiaNodesScanned} nodes; candidates={UiaCandidateMultiplier}x; max_area={MaxUiaTargetAreaRatio:0.##}; reuse={(ReuseUiaTargetsWhenScreenUnchanged ? "on" : "off")}" : "off")}");
                 Console.WriteLine($"Local high-level actions: {(AllowHighLevelActions ? "enabled" : "disabled")}; run_command={(AllowRunCommand ? "enabled" : "disabled")}; real_ui_only={(ForceRealUiOnly ? "on" : "off")}");
             }
+
+            internal static void PrintStartupSummary()
+            {
+                ConsoleTheme.WriteStartupBanner(
+                    Model,
+                    RunProfile,
+                    ReasoningEffortDisplay(Model, ReasoningEffort),
+                    EffectiveQaModel(),
+                    EffectiveVerifyModel());
+            }
         
             internal static void ApplyEnvironmentConfig()
             {

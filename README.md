@@ -113,7 +113,7 @@ Logs are stored in the following folders:
 | ------------------------- | ------------------------------------------------- | -------------------------------- | ----- |
 | OpenAI API key            | `OPENAI_API_KEY`                                  | —                                | **Required** |
 | Runtime profile           | `RDPILOT_PROFILE=fast/balanced/quality`, `FAST_MODE=1`, `QUALITY_MODE=1` | `--fast` / `--balanced` / `--quality` | Default `fast`; `RDPILOT_PROFILE` overrides mode aliases |
-| Model                     | `OPENAI_MODEL=gpt-5.5`                            | `--model <model>`                | Default `gpt-5.5` |
+| Model                     | `OPENAI_MODEL=gpt-5.6-terra`                      | `--model <model>`                | Default `gpt-5.6-terra` |
 | Q&A model                 | `OPENAI_QA_MODEL=<model>`                         | `--qa-model <model>`             | Falls back to `--model` |
 | Verify model              | `OPENAI_VERIFY_MODEL=<model>`                     | `--verify-model <model>`         | Falls back to `--model` |
 | Reasoning effort          | `OPENAI_REASONING_EFFORT=low/medium/high/...`    | `--effort <effort>`              | Use `default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`; sent only for reasoning models |
@@ -203,7 +203,7 @@ Example:
 ```json
 {
   "profile": "fast",
-  "model": "gpt-5.5",
+  "model": "gpt-5.6-terra",
   "qaModel": "gpt-5-mini",
   "verifyModel": "gpt-5-mini",
   "qaReasoningEffort": "low",
@@ -279,7 +279,7 @@ Example:
 * `quality`: original PNG screenshots and crops, original PNG screen logs, focus UIA crop, debug overlays, longer step history, verifier always on, `effort=medium`.
 
 The control loop can temporarily raise reasoning effort to `medium`/`high` when it detects stagnation or repeated ineffective actions.
-Use `--no-adaptive-effort` to keep GPT-5.5 on the configured effort for latency-sensitive runs.
+Use `--no-adaptive-effort` to keep `gpt-5.6-terra` on the configured effort for latency-sensitive runs.
 Q&A and verifier calls can use separate effort settings, so the main control loop can spend more reasoning only when needed while cheaper helper calls stay on `low`. For helper calls, `default` is explicit: it omits `reasoning.effort` instead of falling back to the control-loop effort.
 Verifier calls use a smaller output-token cap by default because they return only `yes`/`no` plus a short reason.
 Q&A and verifier calls can use their own smaller screenshot width, keeping helper calls cheaper than the main control loop.
@@ -359,7 +359,7 @@ If a long `wait` action leaves the screen visually unchanged, RDPilot waits a sh
 Screenshot sanity checks warn when the captured screen is nearly black, nearly uniform, unexpectedly small, or when the RDPilot console itself is the foreground window and may be covering the target app.
 Active-window and focused-UIA metadata are scanned for modal, permission, and UAC hints; when detected, the next prompt tells the model to resolve the visible dialog explicitly.
 By default RDPilot minimizes its own console before control-loop screenshots and actions, then restores it when the run finishes. This prevents the console from becoming the UI target or covering the app being controlled.
-Ctrl+Alt+Q cancels in-flight OpenAI HTTP calls and retry backoff, so aborting a slow GPT-5.5 response no longer waits for the request timeout.
+Ctrl+Alt+Q cancels in-flight OpenAI HTTP calls and retry backoff, so aborting a slow `gpt-5.6-terra` response no longer waits for the request timeout.
 The same abort token cancels long `wait`, verifier settle delay, batched waits, and post-action delays.
 After retryable OpenAI failures such as 5xx, timeout, or transport errors, the control loop keeps the goal alive for a small number of attempts instead of aborting after the first failed call. Non-retryable errors and parse errors still stop the goal.
 If a response completes as `status=incomplete` because `max_output_tokens` was spent before valid JSON was emitted, RDPilot retries with a larger output cap and `reasoning.effort=low`.
@@ -387,7 +387,7 @@ Use `--replay-request <request.json> --replay-request-dry-run` to validate that 
 open Edge browser, go to Google.com, and search for the term 'life'
 ```
 
-### Faster GPT-5.5 run
+### Faster `gpt-5.6-terra` run
 
 ```
 dotnet run --project RDPilot -- --effort low "open Edge browser, go to Google.com, and search for the term 'life'"
