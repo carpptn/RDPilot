@@ -2,7 +2,7 @@
 
 **RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a AI operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
 
-* Best results so far with **`gpt-5`**; older models can be **faster**, but are usually less reliable.
+* Best results so far with **`gpt-5.6`**; older models can be **faster**, but are usually less reliable.
 * Designed for **Windows 10/11**, .NET **9** is required.
 
 
@@ -42,7 +42,7 @@ A screenshot of the primary screen—or the full virtual desktop when explicitly
 This screenshot, along with the task prompt, is then sent to the LLM.  
 
 **3. Model Decision**  
-The LLM (e.g., GPT-5) responds with **exactly one action** to be executed, following a strict JSON schema.  
+The LLM (e.g., GPT-5.6) responds with **exactly one action** to be executed, following a strict JSON schema.  
 The available actions include:  
 - `paste_text`
 - `focus_uia`
