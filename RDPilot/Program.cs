@@ -6,10 +6,10 @@ internal static partial class RDPilotApplication
     // === CONFIG ===
     const string DefaultModel = "gpt-5.6-terra";                // e.g., gpt-4o-mini, gpt-4o, gpt-5
     static string Model = DefaultModel;
-    static string? ReasoningEffort = "low";               // null = API/model default; e.g., low, medium, high, xhigh
+    static string? ReasoningEffort = "medium";               // null = API/model default; e.g., low, medium, high, xhigh
     static string? QaReasoningEffort = null;
     static bool QaReasoningEffortExplicit = false;
-    static string? VerifyReasoningEffort = "low";
+    static string? VerifyReasoningEffort = "medium";
     static bool VerifyReasoningEffortExplicit = true;
     static string? QaModel = null;
     static string? VerifyModel = null;
@@ -17,6 +17,7 @@ internal static partial class RDPilotApplication
     
     const int MaxStepsDefault = 10000;
     static int MaxSteps = MaxStepsDefault;
+    static bool MultiMonitorEnabled = false;
 
     // Mouse: enable/disable (default enabled for GPT-5.6-terra vision/control quality)
     static bool MouseEnabled = true;
@@ -53,7 +54,7 @@ internal static partial class RDPilotApplication
     const double NoChangeThreshold = 0.005;             // 0..1 (avg pixel diff after downsampling)
 
     // Speed/quality profile
-    static string RunProfile = "fast";                  // fast | balanced | quality
+    static string RunProfile = "custom";                // custom | fast | balanced | quality
     static int MaxOutputTokens = 600;
     static int QaMaxOutputTokens = 600;
     static int VerifyMaxOutputTokens = 120;
@@ -66,12 +67,45 @@ internal static partial class RDPilotApplication
     static int HistoryTailChars = 1200;
     static int HistoryTailLines = 12;
     static int ActionRepeatCooldownSteps = 2;
+    static int MaxRejectedProposalRepeatsBeforeAbort = 5;
     static int IneffectiveMouseClusterPx = 96;
     static double SkipVerifyConfidenceThreshold = 0.92;
     static int MaxStagnationStepsBeforeAbort = 20;
     static int MaxRepeatedActionBeforeAbort = 5;
     static int MaxModelFailuresBeforeAbort = 2;
     static int MaxActionFailuresBeforeAbort = 2;
+    static string GoalMode = "auto";
+    static bool RecoveryMemoryEnabled = true;
+    static string? RecoveryMemoryPath = null;
+    static int RecoveryMemoryTriggerSteps = 2;
+    static int RecoveryMemoryValidationSteps = 2;
+    static int RecoveryMemoryMaxLessons = 500;
+    static int RecoveryMemoryMaxQuarantinedLessons = 500;
+    static int RecoveryMemoryReservedLessonsPerContext = 5;
+    static int RecoveryMemorySoftMaxLessonsPerContext = 100;
+    static long RecoveryMemoryMaxFileBytes = 32L * 1024 * 1024;
+    static string? RecoveryMemoryArchivePath = null;
+    static long RecoveryMemoryArchiveMaxBytes = 32L * 1024 * 1024;
+    static int RecoveryMemoryArchiveRetainedFiles = 3;
+    static int RecoveryMemoryPromptMaxLessons = 2;
+    static int RecoveryMemoryFailureLimit = 3;
+    static int RuntimeSemanticStateLimit = 256;
+    static int RuntimeGraphEdgeLimit = 512;
+    static int RuntimeRecoveryActionLimit = 64;
+    static int RuntimeCooldownEntryLimit = 256;
+    static int GraphCandidateTtlSteps = 24;
+    static double ProactiveLoopConfidenceThreshold = 0.75;
+    static bool RecoveryProgressVerificationEnabled = true;
+    static double RecoveryProgressConfidenceThreshold = 0.68;
+    static int RecoveryTelemetryMaxBytes = 5 * 1024 * 1024;
+    static int RecoveryTelemetryRetainedFiles = 3;
+    static string? RecoveryMemoryCommand = null;
+    static string? RecoveryMemoryExportPath = null;
+    static string? LoopReplayPath = null;
+    static string? LoopReplayImportPath = null;
+    static string? LoopReplayExportPath = null;
+    static bool LoopReplayAutoExportEnabled = true;
+    static string? LoopReplayCorpusPath = null;
     static int MaxWaitSeconds = 30;
     static bool ScreenPollingEnabled = true;
     static int ScreenPollInitialDelayMs = 120;
@@ -173,7 +207,7 @@ internal static partial class RDPilotApplication
     {
         "open_url", "launch_app", "run_command",
         "paste_text", "focus_uia", "click_uia",
-        "move", "click", "double_click", "keys", "type_text", "scroll",
+        "move", "click", "double_click", "drag_drop", "keys", "type_text", "scroll",
         "request_crop", "point", "aim", "wait", "done"
     };
     static readonly HashSet<string> ReportedSanityWarnings = new(StringComparer.OrdinalIgnoreCase);
@@ -191,6 +225,28 @@ internal static partial class RDPilotApplication
         if (PrintConfigOnly)
         {
             PrintEffectiveConfig();
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(RecoveryMemoryCommand))
+        {
+            ExecuteRecoveryMemoryMaintenance(
+                RecoveryMemoryCommand,
+                RecoveryMemoryExportPath);
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(LoopReplayPath))
+        {
+            ExecuteLoopReplay(LoopReplayPath);
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(LoopReplayImportPath))
+        {
+            ImportIndependentLoopReplayCorpus(LoopReplayImportPath);
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(LoopReplayExportPath))
+        {
+            ExportLoopTelemetryToReplayCorpus(LoopReplayExportPath);
             return;
         }
         if (AnalyzeLogsOnly)
@@ -251,12 +307,27 @@ internal static partial class RDPilotApplication
                 break;
 
             if (IsQuestion(goal))
+            {
                 await RunAskOnce(apiKey!, goal);
+                Console.WriteLine();
+                Console.WriteLine("✅ Answer completed. Enter next (ENTER = exit).");
+            }
             else
-                await RunOnce(apiKey!, goal);
-
-            Console.WriteLine();
-            Console.WriteLine("✅ Done. Enter next (ENTER = exit).");
+            {
+                var result = await RunOnce(apiKey!, goal);
+                Console.WriteLine();
+                var marker = result.Outcome switch
+                {
+                    ControlRunOutcome.Completed => "✅",
+                    ControlRunOutcome.Cancelled => "⏹",
+                    ControlRunOutcome.GuardStopped => "🛑",
+                    ControlRunOutcome.StepLimitReached => "⏱",
+                    _ => "❌"
+                };
+                Console.WriteLine(
+                    $"{marker} {result.Outcome}: {result.Message} " +
+                    $"(step={result.Step}). Enter next (ENTER = exit).");
+            }
         }
     }
 }

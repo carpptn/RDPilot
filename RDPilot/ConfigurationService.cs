@@ -15,11 +15,13 @@ internal static partial class RDPilotApplication
                 Console.WriteLine($"Model: {Model}");
                 Console.WriteLine($"QA model: {EffectiveQaModel()}; verify model: {EffectiveVerifyModel()}");
                 Console.WriteLine($"Reasoning effort: control={ReasoningEffortDisplay(Model, ReasoningEffort)}; qa={ReasoningEffortDisplay(EffectiveQaModel(), EffectiveQaReasoningEffort())}; verify={ReasoningEffortDisplay(EffectiveVerifyModel(), EffectiveVerifyReasoningEffort())}; adaptive={(AdaptiveReasoningEffort ? "on" : "off")}");
-                Console.WriteLine($"UI mode: {uiMode}; mouse={(MouseEnabled ? "enabled" : "disabled")}; post-action delay={UiSettleDelayMs} ms; grid={(GridStepPx > 0 ? $"{GridStepPx}px" : "off")}");
+                Console.WriteLine($"UI mode: {uiMode}; mouse={(MouseEnabled ? "enabled" : "disabled")}; desktop={(MultiMonitorEnabled ? "virtual multi-monitor" : "primary monitor only")}; post-action delay={UiSettleDelayMs} ms; grid={(GridStepPx > 0 ? $"{GridStepPx}px" : "off")}");
                 Console.WriteLine($"Images: send={ScreenshotSendFormat} max-width={ScreenshotMaxWidthDisplay()} focused-overview={FocusedOverviewMaxWidthDisplay()} qa={QaScreenshotMaxWidthDisplay()} verify={VerifyScreenshotMaxWidthDisplay()} quality={ScreenshotJpegQuality}; crop={CropSendFormat} max-width={CropMaxWidthDisplay()} size={FocusCropSize}px; screen-log={ScreenLogFormat} max-width={ScreenLogMaxWidthDisplay()}; focus_uia={(IncludeFocusUia ? "on" : "off")}; focus crop={(IncludeFocusUiaCrop ? "on" : "off")}; debug images={(DebugImages ? "on" : "off")}");
                 Console.WriteLine($"Output: max_tokens={MaxOutputTokens}; qa_max_tokens={QaMaxOutputTokens}; verify_max_tokens={VerifyMaxOutputTokens}; incomplete_retries={IncompleteMaxOutputRetries}/{IncompleteMaxOutputTokenCap}; verbosity={TextVerbosity}; action_text_chars={MaxActionTextChars}; history_chars={HistoryTailChars}; history_lines={HistoryTailLines}; verify={VerifyMode}; verify_early_steps={VerifyEarlySteps}; verify_low_confidence={VerifyLowConfidenceThreshold:0.##}; skip_verify_confidence={SkipVerifyConfidenceThreshold:0.##}; verify-refresh={(RefreshScreenshotBeforeVerify ? "on" : "off")}; long text paste threshold={ClipboardPasteThreshold}; prompt_cache={(UsePromptCache ? PromptCacheKey ?? "on" : "off")}; previous_response_state={(UsePreviousResponseState ? "on" : "off")}; omit_unchanged_screen={(OmitUnchangedScreenImageWithState ? "on" : "off")}");
                 Console.WriteLine($"Logs: requests={(LogRequests ? (PrettyRequestLogs ? "pretty" : "compact") : "off")}; screens={(LogScreens ? "on" : "state-only")}; retries={OpenAiMaxRetries}; timeout={(OpenAiTimeoutSeconds > 0 ? $"{OpenAiTimeoutSeconds}s" : "infinite")}; batch candidates={(ExecuteMultiActionCandidates ? $"on/{MaxQueuedBatchActions}" : "off")}");
-                Console.WriteLine($"Loop guards: max_steps={MaxSteps}; max_wait={(MaxWaitSeconds > 0 ? $"{MaxWaitSeconds}s" : "off")}; stagnation={(MaxStagnationStepsBeforeAbort > 0 ? MaxStagnationStepsBeforeAbort.ToString() : "off")}; repeated_action={(MaxRepeatedActionBeforeAbort > 0 ? MaxRepeatedActionBeforeAbort.ToString() : "off")}; repeat_cooldown={(ActionRepeatCooldownSteps > 0 ? ActionRepeatCooldownSteps.ToString() : "off")}; model_failures={(MaxModelFailuresBeforeAbort > 0 ? MaxModelFailuresBeforeAbort.ToString() : "off")}; action_failures={(MaxActionFailuresBeforeAbort > 0 ? MaxActionFailuresBeforeAbort.ToString() : "off")}");
+                Console.WriteLine($"Loop guards: goal_mode={GoalMode}; max_steps={(MaxSteps > 0 ? MaxSteps.ToString() : "unlimited")}; max_wait={(MaxWaitSeconds > 0 ? $"{MaxWaitSeconds}s" : "off")}; stagnation={(MaxStagnationStepsBeforeAbort > 0 ? MaxStagnationStepsBeforeAbort.ToString() : "off")}; repeated_action={(MaxRepeatedActionBeforeAbort > 0 ? MaxRepeatedActionBeforeAbort.ToString() : "off")}; rejected_proposals={(MaxRejectedProposalRepeatsBeforeAbort > 0 ? MaxRejectedProposalRepeatsBeforeAbort.ToString() : "off")}; repeat_cooldown={(ActionRepeatCooldownSteps > 0 ? ActionRepeatCooldownSteps.ToString() : "off")}; proactive_confidence={ProactiveLoopConfidenceThreshold:0.00}; model_failures={(MaxModelFailuresBeforeAbort > 0 ? MaxModelFailuresBeforeAbort.ToString() : "off")}; action_failures={(MaxActionFailuresBeforeAbort > 0 ? MaxActionFailuresBeforeAbort.ToString() : "off")}");
+                Console.WriteLine($"Recovery memory: {(RecoveryMemoryEnabled ? $"on; trigger={RecoveryMemoryTriggerSteps}; validate={RecoveryMemoryValidationSteps}; failure_limit={RecoveryMemoryFailureLimit}; active_max={RecoveryMemoryMaxLessons}; quarantine_max={RecoveryMemoryMaxQuarantinedLessons}; context={RecoveryMemoryReservedLessonsPerContext}/{RecoveryMemorySoftMaxLessonsPerContext}; file_max={RecoveryMemoryMaxFileBytes}B; archive={EffectiveRecoveryMemoryArchivePath()} ({RecoveryMemoryArchiveMaxBytes}B x {RecoveryMemoryArchiveRetainedFiles}); prompt={RecoveryMemoryPromptMaxLessons}; progress_verify={(RecoveryProgressVerificationEnabled ? $"on/{RecoveryProgressConfidenceThreshold:0.00}" : "off")}; telemetry={RecoveryTelemetryMaxBytes}B/{RecoveryTelemetryRetainedFiles}; replay_auto_export={(LoopReplayAutoExportEnabled ? EffectiveLoopReplayCorpusPath() : "off")}; path={EffectiveRecoveryMemoryPath()}" : "off")}");
+                Console.WriteLine($"Runtime bounds: semantic_states={RuntimeSemanticStateLimit}; graph_edges={RuntimeGraphEdgeLimit}; recovery_actions={RuntimeRecoveryActionLimit}; cooldowns={RuntimeCooldownEntryLimit}; graph_candidate_ttl={GraphCandidateTtlSteps} steps");
                 Console.WriteLine($"Screen settle: polling={(ScreenPollingEnabled ? $"on initial={ScreenPollInitialDelayMs}ms interval={ScreenPollIntervalMs}ms timeout={ScreenPollTimeoutMs}ms wait_extra={WaitNoChangeExtraMs}ms" : "off")}; sanity={(ScreenSanityChecks ? "on" : "off")}");
                 Console.WriteLine($"Input retry: sendinput_retries={SendInputMaxRetries}; retry_delay={SendInputRetryDelayMs}ms");
                 Console.WriteLine($"Console: auto_hide={(AutoHideConsoleDuringRun ? "on" : "off")}; minimize_flag={(MinimizeConsoleDuringRun ? "on" : "off")}; restore_after_run={(RestoreConsoleAfterRun ? "on" : "off")}");
@@ -65,7 +67,8 @@ internal static partial class RDPilotApplication
         
                 ApplyDelayMs(Environment.GetEnvironmentVariable("POST_ACTION_DELAY_MS"), "POST_ACTION_DELAY_MS");
                 ApplyGridStep(Environment.GetEnvironmentVariable("GRID_STEP_PX"), "GRID_STEP_PX");
-                ApplyInt(Environment.GetEnvironmentVariable("MAX_STEPS"), "MAX_STEPS", 1, int.MaxValue, v => MaxSteps = v);
+                ApplyInt(Environment.GetEnvironmentVariable("MAX_STEPS"), "MAX_STEPS", 0, int.MaxValue, v => MaxSteps = v);
+                ApplyBool(Environment.GetEnvironmentVariable("MULTI_MONITOR"), "MULTI_MONITOR", v => MultiMonitorEnabled = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_WAIT_SECONDS"), "MAX_WAIT_SECONDS", 0, int.MaxValue, v => MaxWaitSeconds = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_OUTPUT_TOKENS"), "MAX_OUTPUT_TOKENS", 1, int.MaxValue, v => MaxOutputTokens = v);
                 ApplyInt(Environment.GetEnvironmentVariable("QA_MAX_OUTPUT_TOKENS"), "QA_MAX_OUTPUT_TOKENS", 1, int.MaxValue, v => QaMaxOutputTokens = v);
@@ -81,9 +84,43 @@ internal static partial class RDPilotApplication
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_STAGNATION_STEPS"), "MAX_STAGNATION_STEPS", 0, int.MaxValue, v => MaxStagnationStepsBeforeAbort = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_REPEATED_ACTIONS"), "MAX_REPEATED_ACTIONS", 0, int.MaxValue, v => MaxRepeatedActionBeforeAbort = v);
                 ApplyInt(Environment.GetEnvironmentVariable("ACTION_REPEAT_COOLDOWN_STEPS"), "ACTION_REPEAT_COOLDOWN_STEPS", 0, int.MaxValue, v => ActionRepeatCooldownSteps = v);
+                ApplyInt(Environment.GetEnvironmentVariable("MAX_REJECTED_PROPOSAL_REPEATS"), "MAX_REJECTED_PROPOSAL_REPEATS", 0, int.MaxValue, v => MaxRejectedProposalRepeatsBeforeAbort = v);
+                ApplyGoalMode(Environment.GetEnvironmentVariable("GOAL_MODE"), "GOAL_MODE");
                 ApplyDouble(Environment.GetEnvironmentVariable("SKIP_VERIFY_CONFIDENCE_THRESHOLD"), "SKIP_VERIFY_CONFIDENCE_THRESHOLD", 0.0, 1.0, v => SkipVerifyConfidenceThreshold = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_MODEL_FAILURES"), "MAX_MODEL_FAILURES", 0, int.MaxValue, v => MaxModelFailuresBeforeAbort = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_ACTION_FAILURES"), "MAX_ACTION_FAILURES", 0, int.MaxValue, v => MaxActionFailuresBeforeAbort = v);
+                ApplyBool(Environment.GetEnvironmentVariable("RECOVERY_MEMORY"), "RECOVERY_MEMORY", v => RecoveryMemoryEnabled = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_TRIGGER_STEPS"), "RECOVERY_MEMORY_TRIGGER_STEPS", 1, int.MaxValue, v => RecoveryMemoryTriggerSteps = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_VALIDATION_STEPS"), "RECOVERY_MEMORY_VALIDATION_STEPS", 1, int.MaxValue, v => RecoveryMemoryValidationSteps = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_MAX_LESSONS"), "RECOVERY_MEMORY_MAX_LESSONS", 1, int.MaxValue, v => RecoveryMemoryMaxLessons = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_MAX_QUARANTINED_LESSONS"), "RECOVERY_MEMORY_MAX_QUARANTINED_LESSONS", 1, int.MaxValue, v => RecoveryMemoryMaxQuarantinedLessons = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_RESERVED_LESSONS_PER_CONTEXT"), "RECOVERY_MEMORY_RESERVED_LESSONS_PER_CONTEXT", 0, int.MaxValue, v => RecoveryMemoryReservedLessonsPerContext = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_SOFT_MAX_LESSONS_PER_CONTEXT"), "RECOVERY_MEMORY_SOFT_MAX_LESSONS_PER_CONTEXT", 1, int.MaxValue, v => RecoveryMemorySoftMaxLessonsPerContext = v);
+                ApplyLong(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_MAX_FILE_BYTES"), "RECOVERY_MEMORY_MAX_FILE_BYTES", 1024 * 1024, int.MaxValue, v => RecoveryMemoryMaxFileBytes = v);
+                ApplyLong(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_ARCHIVE_MAX_BYTES"), "RECOVERY_MEMORY_ARCHIVE_MAX_BYTES", 1024 * 1024, int.MaxValue, v => RecoveryMemoryArchiveMaxBytes = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_ARCHIVE_RETAINED_FILES"), "RECOVERY_MEMORY_ARCHIVE_RETAINED_FILES", 1, 20, v => RecoveryMemoryArchiveRetainedFiles = v);
+                var envRecoveryMemoryArchivePath = Environment.GetEnvironmentVariable("RECOVERY_MEMORY_ARCHIVE_PATH");
+                if (!string.IsNullOrWhiteSpace(envRecoveryMemoryArchivePath))
+                    RecoveryMemoryArchivePath = envRecoveryMemoryArchivePath.Trim();
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_PROMPT_LESSONS"), "RECOVERY_MEMORY_PROMPT_LESSONS", 0, 10, v => RecoveryMemoryPromptMaxLessons = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_MEMORY_FAILURE_LIMIT"), "RECOVERY_MEMORY_FAILURE_LIMIT", 1, int.MaxValue, v => RecoveryMemoryFailureLimit = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RUNTIME_SEMANTIC_STATE_LIMIT"), "RUNTIME_SEMANTIC_STATE_LIMIT", 32, 100000, v => RuntimeSemanticStateLimit = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RUNTIME_GRAPH_EDGE_LIMIT"), "RUNTIME_GRAPH_EDGE_LIMIT", 32, 100000, v => RuntimeGraphEdgeLimit = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RUNTIME_RECOVERY_ACTION_LIMIT"), "RUNTIME_RECOVERY_ACTION_LIMIT", 8, 10000, v => RuntimeRecoveryActionLimit = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RUNTIME_COOLDOWN_ENTRY_LIMIT"), "RUNTIME_COOLDOWN_ENTRY_LIMIT", 16, 100000, v => RuntimeCooldownEntryLimit = v);
+                ApplyInt(Environment.GetEnvironmentVariable("GRAPH_CANDIDATE_TTL_STEPS"), "GRAPH_CANDIDATE_TTL_STEPS", 2, 10000, v => GraphCandidateTtlSteps = v);
+                ApplyDouble(Environment.GetEnvironmentVariable("PROACTIVE_LOOP_CONFIDENCE_THRESHOLD"), "PROACTIVE_LOOP_CONFIDENCE_THRESHOLD", 0.5, 1.0, v => ProactiveLoopConfidenceThreshold = v);
+                ApplyBool(Environment.GetEnvironmentVariable("RECOVERY_PROGRESS_VERIFICATION"), "RECOVERY_PROGRESS_VERIFICATION", v => RecoveryProgressVerificationEnabled = v);
+                ApplyDouble(Environment.GetEnvironmentVariable("RECOVERY_PROGRESS_CONFIDENCE_THRESHOLD"), "RECOVERY_PROGRESS_CONFIDENCE_THRESHOLD", 0.5, 1.0, v => RecoveryProgressConfidenceThreshold = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_TELEMETRY_MAX_BYTES"), "RECOVERY_TELEMETRY_MAX_BYTES", 65536, int.MaxValue, v => RecoveryTelemetryMaxBytes = v);
+                ApplyInt(Environment.GetEnvironmentVariable("RECOVERY_TELEMETRY_RETAINED_FILES"), "RECOVERY_TELEMETRY_RETAINED_FILES", 1, 20, v => RecoveryTelemetryRetainedFiles = v);
+                ApplyBool(Environment.GetEnvironmentVariable("LOOP_REPLAY_AUTO_EXPORT"), "LOOP_REPLAY_AUTO_EXPORT", v => LoopReplayAutoExportEnabled = v);
+                var envLoopReplayCorpusPath = Environment.GetEnvironmentVariable("LOOP_REPLAY_CORPUS_PATH");
+                if (!string.IsNullOrWhiteSpace(envLoopReplayCorpusPath))
+                    LoopReplayCorpusPath = envLoopReplayCorpusPath.Trim();
+                var envRecoveryMemoryPath = Environment.GetEnvironmentVariable("RECOVERY_MEMORY_PATH");
+                if (!string.IsNullOrWhiteSpace(envRecoveryMemoryPath))
+                    RecoveryMemoryPath = envRecoveryMemoryPath.Trim();
                 ApplyBool(Environment.GetEnvironmentVariable("SCREEN_POLLING"), "SCREEN_POLLING", v => ScreenPollingEnabled = v);
                 ApplyInt(Environment.GetEnvironmentVariable("SCREEN_POLL_INITIAL_DELAY_MS"), "SCREEN_POLL_INITIAL_DELAY_MS", 0, 10000, v => ScreenPollInitialDelayMs = v);
                 ApplyInt(Environment.GetEnvironmentVariable("SCREEN_POLL_INTERVAL_MS"), "SCREEN_POLL_INTERVAL_MS", 10, 10000, v => ScreenPollIntervalMs = v);
@@ -190,6 +227,16 @@ internal static partial class RDPilotApplication
                     if (arg.Equals("--no-mouse", StringComparison.OrdinalIgnoreCase))
                     {
                         MouseEnabled = false;
+                        continue;
+                    }
+                    if (arg.Equals("--multi-monitor", StringComparison.OrdinalIgnoreCase))
+                    {
+                        MultiMonitorEnabled = true;
+                        continue;
+                    }
+                    if (arg.Equals("--primary-monitor-only", StringComparison.OrdinalIgnoreCase))
+                    {
+                        MultiMonitorEnabled = false;
                         continue;
                     }
                     if (arg.Equals("--fast", StringComparison.OrdinalIgnoreCase))
@@ -307,6 +354,46 @@ internal static partial class RDPilotApplication
                     if (arg.Equals("--no-batch-candidates", StringComparison.OrdinalIgnoreCase))
                     {
                         ExecuteMultiActionCandidates = false;
+                        continue;
+                    }
+                    if (arg.Equals("--recovery-memory", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RecoveryMemoryEnabled = true;
+                        continue;
+                    }
+                    if (arg.Equals("--no-recovery-memory", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RecoveryMemoryEnabled = false;
+                        continue;
+                    }
+                    if (arg.Equals("--memory-list", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RecoveryMemoryCommand = "list";
+                        continue;
+                    }
+                    if (arg.Equals("--memory-prune", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RecoveryMemoryCommand = "prune";
+                        continue;
+                    }
+                    if (arg.Equals("--recovery-progress-verification", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RecoveryProgressVerificationEnabled = true;
+                        continue;
+                    }
+                    if (arg.Equals("--no-recovery-progress-verification", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RecoveryProgressVerificationEnabled = false;
+                        continue;
+                    }
+                    if (arg.Equals("--loop-replay-auto-export", StringComparison.OrdinalIgnoreCase))
+                    {
+                        LoopReplayAutoExportEnabled = true;
+                        continue;
+                    }
+                    if (arg.Equals("--no-loop-replay-auto-export", StringComparison.OrdinalIgnoreCase))
+                    {
+                        LoopReplayAutoExportEnabled = false;
                         continue;
                     }
                     if (arg.Equals("--refresh-before-verify", StringComparison.OrdinalIgnoreCase))
@@ -439,7 +526,12 @@ internal static partial class RDPilotApplication
                     }
                     if (TryReadOption(args, ref i, "--max-steps", out var maxSteps))
                     {
-                        ApplyInt(maxSteps, "--max-steps", 1, int.MaxValue, v => MaxSteps = v);
+                        ApplyInt(maxSteps, "--max-steps", 0, int.MaxValue, v => MaxSteps = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--goal-mode", out var goalMode))
+                    {
+                        ApplyGoalMode(goalMode, "--goal-mode");
                         continue;
                     }
                     if (TryReadOption(args, ref i, "--max-wait", out var maxWait))
@@ -517,6 +609,11 @@ internal static partial class RDPilotApplication
                         ApplyInt(repeatCooldown, "--repeat-cooldown", 0, int.MaxValue, v => ActionRepeatCooldownSteps = v);
                         continue;
                     }
+                    if (TryReadOption(args, ref i, "--max-rejected-proposals", out var maxRejectedProposals))
+                    {
+                        ApplyInt(maxRejectedProposals, "--max-rejected-proposals", 0, int.MaxValue, v => MaxRejectedProposalRepeatsBeforeAbort = v);
+                        continue;
+                    }
                     if (TryReadOption(args, ref i, "--skip-verify-confidence", out var skipVerifyConfidence))
                     {
                         ApplyDouble(skipVerifyConfidence, "--skip-verify-confidence", 0.0, 1.0, v => SkipVerifyConfidenceThreshold = v);
@@ -530,6 +627,143 @@ internal static partial class RDPilotApplication
                     if (TryReadOption(args, ref i, "--max-action-failures", out var maxActionFailures))
                     {
                         ApplyInt(maxActionFailures, "--max-action-failures", 0, int.MaxValue, v => MaxActionFailuresBeforeAbort = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-memory-path", out var recoveryMemoryPath))
+                    {
+                        if (!string.IsNullOrWhiteSpace(recoveryMemoryPath))
+                            RecoveryMemoryPath = recoveryMemoryPath.Trim();
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--memory-export", out var memoryExportPath))
+                    {
+                        RecoveryMemoryCommand = "export";
+                        RecoveryMemoryExportPath = memoryExportPath;
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-trigger", out var recoveryTrigger))
+                    {
+                        ApplyInt(recoveryTrigger, "--recovery-trigger", 1, int.MaxValue, v => RecoveryMemoryTriggerSteps = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-validation", out var recoveryValidation))
+                    {
+                        ApplyInt(recoveryValidation, "--recovery-validation", 1, int.MaxValue, v => RecoveryMemoryValidationSteps = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-max-lessons", out var recoveryMaxLessons))
+                    {
+                        ApplyInt(recoveryMaxLessons, "--recovery-max-lessons", 1, int.MaxValue, v => RecoveryMemoryMaxLessons = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-max-quarantined", out var recoveryMaxQuarantined))
+                    {
+                        ApplyInt(recoveryMaxQuarantined, "--recovery-max-quarantined", 1, int.MaxValue, v => RecoveryMemoryMaxQuarantinedLessons = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-reserved-per-context", out var recoveryReservedPerContext))
+                    {
+                        ApplyInt(recoveryReservedPerContext, "--recovery-reserved-per-context", 0, int.MaxValue, v => RecoveryMemoryReservedLessonsPerContext = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-soft-max-per-context", out var recoverySoftMaxPerContext))
+                    {
+                        ApplyInt(recoverySoftMaxPerContext, "--recovery-soft-max-per-context", 1, int.MaxValue, v => RecoveryMemorySoftMaxLessonsPerContext = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-max-file-bytes", out var recoveryMaxFileBytes))
+                    {
+                        ApplyLong(recoveryMaxFileBytes, "--recovery-max-file-bytes", 1024 * 1024, int.MaxValue, v => RecoveryMemoryMaxFileBytes = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-archive-max-bytes", out var recoveryArchiveMaxBytes))
+                    {
+                        ApplyLong(recoveryArchiveMaxBytes, "--recovery-archive-max-bytes", 1024 * 1024, int.MaxValue, v => RecoveryMemoryArchiveMaxBytes = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-archive-retained-files", out var recoveryArchiveRetainedFiles))
+                    {
+                        ApplyInt(recoveryArchiveRetainedFiles, "--recovery-archive-retained-files", 1, 20, v => RecoveryMemoryArchiveRetainedFiles = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-archive-path", out var recoveryArchivePath))
+                    {
+                        RecoveryMemoryArchivePath = recoveryArchivePath;
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-prompt-lessons", out var recoveryPromptLessons))
+                    {
+                        ApplyInt(recoveryPromptLessons, "--recovery-prompt-lessons", 0, 10, v => RecoveryMemoryPromptMaxLessons = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-failure-limit", out var recoveryFailureLimit))
+                    {
+                        ApplyInt(recoveryFailureLimit, "--recovery-failure-limit", 1, int.MaxValue, v => RecoveryMemoryFailureLimit = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--runtime-semantic-states", out var semanticStateLimit))
+                    {
+                        ApplyInt(semanticStateLimit, "--runtime-semantic-states", 32, 100000, v => RuntimeSemanticStateLimit = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--runtime-graph-edges", out var graphEdgeLimit))
+                    {
+                        ApplyInt(graphEdgeLimit, "--runtime-graph-edges", 32, 100000, v => RuntimeGraphEdgeLimit = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--runtime-recovery-actions", out var recoveryActionLimit))
+                    {
+                        ApplyInt(recoveryActionLimit, "--runtime-recovery-actions", 8, 10000, v => RuntimeRecoveryActionLimit = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--runtime-cooldowns", out var cooldownLimit))
+                    {
+                        ApplyInt(cooldownLimit, "--runtime-cooldowns", 16, 100000, v => RuntimeCooldownEntryLimit = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--graph-candidate-ttl", out var graphCandidateTtl))
+                    {
+                        ApplyInt(graphCandidateTtl, "--graph-candidate-ttl", 2, 10000, v => GraphCandidateTtlSteps = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--loop-confidence-threshold", out var loopConfidenceThreshold))
+                    {
+                        ApplyDouble(loopConfidenceThreshold, "--loop-confidence-threshold", 0.5, 1.0, v => ProactiveLoopConfidenceThreshold = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-progress-confidence", out var progressConfidenceThreshold))
+                    {
+                        ApplyDouble(progressConfidenceThreshold, "--recovery-progress-confidence", 0.5, 1.0, v => RecoveryProgressConfidenceThreshold = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-telemetry-max-bytes", out var telemetryMaxBytes))
+                    {
+                        ApplyInt(telemetryMaxBytes, "--recovery-telemetry-max-bytes", 65536, int.MaxValue, v => RecoveryTelemetryMaxBytes = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--recovery-telemetry-retained-files", out var telemetryRetainedFiles))
+                    {
+                        ApplyInt(telemetryRetainedFiles, "--recovery-telemetry-retained-files", 1, 20, v => RecoveryTelemetryRetainedFiles = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--loop-replay", out var loopReplayPath))
+                    {
+                        LoopReplayPath = loopReplayPath;
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--loop-replay-import", out var loopReplayImportPath))
+                    {
+                        LoopReplayImportPath = loopReplayImportPath;
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--loop-replay-export", out var loopReplayExportPath))
+                    {
+                        LoopReplayExportPath = loopReplayExportPath;
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--loop-replay-corpus", out var loopReplayCorpusPath))
+                    {
+                        LoopReplayCorpusPath = loopReplayCorpusPath;
                         continue;
                     }
                     if (TryReadOption(args, ref i, "--screen-poll-initial-delay", out var pollInitialDelay))
@@ -732,8 +966,36 @@ internal static partial class RDPilotApplication
                     IncludeFocusUiaCrop = false;
                 if (MaxUiaTargets <= 0)
                     IncludeUiaTargets = false;
+                MaxSteps = Math.Max(0, MaxSteps);
                 MaxActionTextChars = Math.Max(256, MaxActionTextChars);
                 IncompleteMaxOutputTokenCap = Math.Max(MaxOutputTokens, IncompleteMaxOutputTokenCap);
+                RecoveryMemoryTriggerSteps = Math.Max(1, RecoveryMemoryTriggerSteps);
+                RecoveryMemoryValidationSteps = Math.Max(1, RecoveryMemoryValidationSteps);
+                RecoveryMemoryMaxLessons = Math.Max(1, RecoveryMemoryMaxLessons);
+                RecoveryMemoryMaxQuarantinedLessons = Math.Max(1, RecoveryMemoryMaxQuarantinedLessons);
+                RecoveryMemoryReservedLessonsPerContext = Math.Max(0, RecoveryMemoryReservedLessonsPerContext);
+                RecoveryMemorySoftMaxLessonsPerContext = Math.Max(
+                    Math.Max(1, RecoveryMemoryReservedLessonsPerContext),
+                    RecoveryMemorySoftMaxLessonsPerContext);
+                RecoveryMemoryMaxFileBytes = Math.Max(1024 * 1024, RecoveryMemoryMaxFileBytes);
+                RecoveryMemoryArchiveMaxBytes = Math.Max(1024 * 1024, RecoveryMemoryArchiveMaxBytes);
+                RecoveryMemoryArchiveRetainedFiles = Math.Clamp(RecoveryMemoryArchiveRetainedFiles, 1, 20);
+                RecoveryMemoryPromptMaxLessons = Math.Clamp(RecoveryMemoryPromptMaxLessons, 0, 10);
+                RecoveryMemoryFailureLimit = Math.Max(1, RecoveryMemoryFailureLimit);
+                MaxRejectedProposalRepeatsBeforeAbort = Math.Max(0, MaxRejectedProposalRepeatsBeforeAbort);
+                RuntimeSemanticStateLimit = Math.Clamp(RuntimeSemanticStateLimit, 32, 100000);
+                RuntimeGraphEdgeLimit = Math.Clamp(RuntimeGraphEdgeLimit, 32, 100000);
+                RuntimeRecoveryActionLimit = Math.Clamp(RuntimeRecoveryActionLimit, 8, 10000);
+                RuntimeCooldownEntryLimit = Math.Clamp(RuntimeCooldownEntryLimit, 16, 100000);
+                GraphCandidateTtlSteps = Math.Clamp(GraphCandidateTtlSteps, 2, 10000);
+                ProactiveLoopConfidenceThreshold = Math.Clamp(ProactiveLoopConfidenceThreshold, 0.5, 1.0);
+                RecoveryProgressConfidenceThreshold = Math.Clamp(RecoveryProgressConfidenceThreshold, 0.5, 1.0);
+                RecoveryTelemetryMaxBytes = Math.Max(65536, RecoveryTelemetryMaxBytes);
+                RecoveryTelemetryRetainedFiles = Math.Clamp(RecoveryTelemetryRetainedFiles, 1, 20);
+                GoalMode = NormalizeGoalMode(GoalMode) is var normalizedGoalMode &&
+                           normalizedGoalMode is "auto" or "finite" or "continuous"
+                    ? normalizedGoalMode
+                    : "auto";
             }
         
             internal static void ApplyCliProfileArgs(string[] args)
@@ -811,9 +1073,10 @@ internal static partial class RDPilotApplication
                     if (TryGetString(root, "qaReasoningEffort", out var qaEffort)) ApplyReasoningEffort(qaEffort, path, v => QaReasoningEffort = v, () => QaReasoningEffortExplicit = true);
                     if (TryGetString(root, "verifyReasoningEffort", out var verifyEffort)) ApplyReasoningEffort(verifyEffort, path, v => VerifyReasoningEffort = v, () => VerifyReasoningEffortExplicit = true);
                     if (TryGetBool(root, "mouseEnabled", out var mouseEnabled)) MouseEnabled = mouseEnabled;
+                    if (TryGetBool(root, "multiMonitorEnabled", out var multiMonitorEnabled)) MultiMonitorEnabled = multiMonitorEnabled;
                     if (TryGetInt(root, "postActionDelayMs", out var delay)) UiSettleDelayMs = Math.Max(0, delay);
                     if (TryGetInt(root, "gridStepPx", out var grid)) GridStepPx = Math.Max(0, grid);
-                    if (TryGetInt(root, "maxSteps", out var maxSteps)) MaxSteps = Math.Max(1, maxSteps);
+                    if (TryGetInt(root, "maxSteps", out var maxSteps)) MaxSteps = Math.Max(0, maxSteps);
                     if (TryGetInt(root, "maxWaitSeconds", out var maxWait)) MaxWaitSeconds = Math.Max(0, maxWait);
                     if (TryGetInt(root, "maxOutputTokens", out var maxOutput)) MaxOutputTokens = Math.Max(1, maxOutput);
                     if (TryGetInt(root, "qaMaxOutputTokens", out var qaMaxOutput)) QaMaxOutputTokens = Math.Max(1, qaMaxOutput);
@@ -829,9 +1092,37 @@ internal static partial class RDPilotApplication
                     if (TryGetInt(root, "maxStagnationSteps", out var maxStagnation)) MaxStagnationStepsBeforeAbort = Math.Max(0, maxStagnation);
                     if (TryGetInt(root, "maxRepeatedActions", out var maxRepeated)) MaxRepeatedActionBeforeAbort = Math.Max(0, maxRepeated);
                     if (TryGetInt(root, "actionRepeatCooldownSteps", out var repeatCooldown)) ActionRepeatCooldownSteps = Math.Max(0, repeatCooldown);
+                    if (TryGetInt(root, "maxRejectedProposalRepeats", out var maxRejectedProposals)) MaxRejectedProposalRepeatsBeforeAbort = Math.Max(0, maxRejectedProposals);
                     if (TryGetDouble(root, "skipVerifyConfidenceThreshold", out var skipVerifyConfidence)) SkipVerifyConfidenceThreshold = Math.Clamp(skipVerifyConfidence, 0.0, 1.0);
                     if (TryGetInt(root, "maxModelFailures", out var maxModelFailures)) MaxModelFailuresBeforeAbort = Math.Max(0, maxModelFailures);
                     if (TryGetInt(root, "maxActionFailures", out var maxActionFailures)) MaxActionFailuresBeforeAbort = Math.Max(0, maxActionFailures);
+                    if (TryGetString(root, "goalMode", out var goalMode)) ApplyGoalMode(goalMode, path);
+                    if (TryGetBool(root, "recoveryMemory", out var recoveryMemory)) RecoveryMemoryEnabled = recoveryMemory;
+                    if (TryGetString(root, "recoveryMemoryPath", out var recoveryMemoryPath)) RecoveryMemoryPath = recoveryMemoryPath;
+                    if (TryGetInt(root, "recoveryMemoryTriggerSteps", out var recoveryTrigger)) RecoveryMemoryTriggerSteps = Math.Max(1, recoveryTrigger);
+                    if (TryGetInt(root, "recoveryMemoryValidationSteps", out var recoveryValidation)) RecoveryMemoryValidationSteps = Math.Max(1, recoveryValidation);
+                    if (TryGetInt(root, "recoveryMemoryMaxLessons", out var recoveryMaxLessons)) RecoveryMemoryMaxLessons = Math.Max(1, recoveryMaxLessons);
+                    if (TryGetInt(root, "recoveryMemoryMaxQuarantinedLessons", out var recoveryMaxQuarantined)) RecoveryMemoryMaxQuarantinedLessons = Math.Max(1, recoveryMaxQuarantined);
+                    if (TryGetInt(root, "recoveryMemoryReservedLessonsPerContext", out var recoveryReservedPerContext)) RecoveryMemoryReservedLessonsPerContext = Math.Max(0, recoveryReservedPerContext);
+                    if (TryGetInt(root, "recoveryMemorySoftMaxLessonsPerContext", out var recoverySoftMaxPerContext)) RecoveryMemorySoftMaxLessonsPerContext = Math.Max(1, recoverySoftMaxPerContext);
+                    if (TryGetLong(root, "recoveryMemoryMaxFileBytes", out var recoveryMaxFileBytes)) RecoveryMemoryMaxFileBytes = Math.Max(1024 * 1024, recoveryMaxFileBytes);
+                    if (TryGetString(root, "recoveryMemoryArchivePath", out var recoveryArchivePath)) RecoveryMemoryArchivePath = recoveryArchivePath;
+                    if (TryGetLong(root, "recoveryMemoryArchiveMaxBytes", out var recoveryArchiveMaxBytes)) RecoveryMemoryArchiveMaxBytes = Math.Max(1024 * 1024, recoveryArchiveMaxBytes);
+                    if (TryGetInt(root, "recoveryMemoryArchiveRetainedFiles", out var recoveryArchiveRetainedFiles)) RecoveryMemoryArchiveRetainedFiles = Math.Clamp(recoveryArchiveRetainedFiles, 1, 20);
+                    if (TryGetInt(root, "recoveryMemoryPromptLessons", out var recoveryPromptLessons)) RecoveryMemoryPromptMaxLessons = Math.Clamp(recoveryPromptLessons, 0, 10);
+                    if (TryGetInt(root, "recoveryMemoryFailureLimit", out var recoveryFailureLimit)) RecoveryMemoryFailureLimit = Math.Max(1, recoveryFailureLimit);
+                    if (TryGetInt(root, "runtimeSemanticStateLimit", out var semanticStateLimit)) RuntimeSemanticStateLimit = Math.Clamp(semanticStateLimit, 32, 100000);
+                    if (TryGetInt(root, "runtimeGraphEdgeLimit", out var graphEdgeLimit)) RuntimeGraphEdgeLimit = Math.Clamp(graphEdgeLimit, 32, 100000);
+                    if (TryGetInt(root, "runtimeRecoveryActionLimit", out var recoveryActionLimit)) RuntimeRecoveryActionLimit = Math.Clamp(recoveryActionLimit, 8, 10000);
+                    if (TryGetInt(root, "runtimeCooldownEntryLimit", out var cooldownLimit)) RuntimeCooldownEntryLimit = Math.Clamp(cooldownLimit, 16, 100000);
+                    if (TryGetInt(root, "graphCandidateTtlSteps", out var graphCandidateTtl)) GraphCandidateTtlSteps = Math.Clamp(graphCandidateTtl, 2, 10000);
+                    if (TryGetDouble(root, "proactiveLoopConfidenceThreshold", out var loopConfidenceThreshold)) ProactiveLoopConfidenceThreshold = Math.Clamp(loopConfidenceThreshold, 0.5, 1.0);
+                    if (TryGetBool(root, "recoveryProgressVerification", out var recoveryProgressVerification)) RecoveryProgressVerificationEnabled = recoveryProgressVerification;
+                    if (TryGetDouble(root, "recoveryProgressConfidenceThreshold", out var recoveryProgressConfidence)) RecoveryProgressConfidenceThreshold = Math.Clamp(recoveryProgressConfidence, 0.5, 1.0);
+                    if (TryGetInt(root, "recoveryTelemetryMaxBytes", out var recoveryTelemetryMaxBytes)) RecoveryTelemetryMaxBytes = Math.Max(65536, recoveryTelemetryMaxBytes);
+                    if (TryGetInt(root, "recoveryTelemetryRetainedFiles", out var recoveryTelemetryRetainedFiles)) RecoveryTelemetryRetainedFiles = Math.Clamp(recoveryTelemetryRetainedFiles, 1, 20);
+                    if (TryGetBool(root, "loopReplayAutoExport", out var loopReplayAutoExport)) LoopReplayAutoExportEnabled = loopReplayAutoExport;
+                    if (TryGetString(root, "loopReplayCorpusPath", out var loopReplayCorpusPath)) LoopReplayCorpusPath = loopReplayCorpusPath;
                     if (TryGetBool(root, "screenPolling", out var screenPolling)) ScreenPollingEnabled = screenPolling;
                     if (TryGetInt(root, "screenPollInitialDelayMs", out var pollInitialDelay)) ScreenPollInitialDelayMs = Math.Clamp(pollInitialDelay, 0, 10000);
                     if (TryGetInt(root, "screenPollIntervalMs", out var pollInterval)) ScreenPollIntervalMs = Math.Clamp(pollInterval, 10, 10000);
@@ -907,6 +1198,14 @@ internal static partial class RDPilotApplication
                     value = 0;
                     return root.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out value);
                 }
+
+                static bool TryGetLong(JsonElement root, string name, out long value)
+                {
+                    value = 0;
+                    return root.TryGetProperty(name, out var el) &&
+                           el.ValueKind == JsonValueKind.Number &&
+                           el.TryGetInt64(out value);
+                }
         
                 static bool TryGetBool(JsonElement root, string name, out bool value)
                 {
@@ -928,14 +1227,75 @@ internal static partial class RDPilotApplication
                 }
             }
         
+            static readonly string[] ProfileControlledSettingNames =
+            [
+                nameof(ReasoningEffort),
+                nameof(QaReasoningEffort),
+                nameof(VerifyReasoningEffort),
+                nameof(UiSettleDelayMs),
+                nameof(MaxOutputTokens),
+                nameof(QaMaxOutputTokens),
+                nameof(VerifyMaxOutputTokens),
+                nameof(QaScreenshotMaxWidth),
+                nameof(VerifyScreenshotMaxWidth),
+                nameof(TextVerbosity),
+                nameof(HistoryTailChars),
+                nameof(HistoryTailLines),
+                nameof(MaxStagnationStepsBeforeAbort),
+                nameof(MaxRepeatedActionBeforeAbort),
+                nameof(ActionRepeatCooldownSteps),
+                nameof(SkipVerifyConfidenceThreshold),
+                nameof(MaxModelFailuresBeforeAbort),
+                nameof(MaxActionFailuresBeforeAbort),
+                nameof(ScreenPollingEnabled),
+                nameof(ScreenPollInitialDelayMs),
+                nameof(ScreenPollIntervalMs),
+                nameof(ScreenPollTimeoutMs),
+                nameof(WaitNoChangeExtraMs),
+                nameof(MaxWaitSeconds),
+                nameof(MaxScreenshotSendWidth),
+                nameof(ScreenshotSendFormat),
+                nameof(FocusedOverviewMaxWidth),
+                nameof(MaxCropSendWidth),
+                nameof(CropSendFormat),
+                nameof(ScreenshotJpegQuality),
+                nameof(ScreenLogFormat),
+                nameof(MaxScreenLogWidth),
+                nameof(PrettyRequestLogs),
+                nameof(IncludeFocusUiaCrop),
+                nameof(DebugImages),
+                nameof(VerifyMode),
+                nameof(UiaTargetNameMaxChars),
+                nameof(UiaSummaryMaxChars),
+                nameof(UiaScanTimeBudgetMs),
+                nameof(MaxUiaNodesScanned),
+                nameof(UiaCandidateMultiplier),
+                nameof(MaxUiaTargetAreaRatio)
+            ];
+            static Dictionary<string, object?>? CodeProfileDefaults;
+
             internal static void ApplyProfile(string? profile)
             {
                 if (string.IsNullOrWhiteSpace(profile))
                     return;
         
                 var normalized = profile.Trim().ToLowerInvariant();
+                if (normalized is not ("custom" or "fast" or "balanced" or "quality"))
+                {
+                    Console.Error.WriteLine($"Unknown profile '{profile}'. Allowed: custom, fast, balanced, quality.");
+                    return;
+                }
+
+                // Profiles are applied from a known baseline. This makes
+                // `custom` a real reset to code defaults and prevents results
+                // from depending on which profile happened to run earlier.
+                ApplyCustomProfileDefaults();
                 switch (normalized)
                 {
+                    case "custom":
+                        RunProfile = "custom";
+                        break;
+
                     case "fast":
                         RunProfile = "fast";
                         ReasoningEffort = "low";
@@ -1074,9 +1434,39 @@ internal static partial class RDPilotApplication
                         MaxUiaTargetAreaRatio = Math.Max(MaxUiaTargetAreaRatio, 0.75);
                         break;
         
-                    default:
-                        Console.Error.WriteLine($"Unknown profile '{profile}'. Allowed: fast, balanced, quality.");
-                        break;
+                }
+            }
+
+            static void ApplyCustomProfileDefaults()
+            {
+                CodeProfileDefaults ??= ProfileControlledSettingNames.ToDictionary(
+                    name => name,
+                    name => typeof(RDPilotApplication)
+                        .GetField(
+                            name,
+                            System.Reflection.BindingFlags.Static |
+                            System.Reflection.BindingFlags.NonPublic)
+                        ?.GetValue(null),
+                    StringComparer.Ordinal);
+
+                RunProfile = "custom";
+                foreach (var (name, value) in CodeProfileDefaults)
+                {
+                    if (name == nameof(QaReasoningEffort) &&
+                        QaReasoningEffortExplicit)
+                    {
+                        continue;
+                    }
+                    if (name == nameof(VerifyReasoningEffort) &&
+                        VerifyReasoningEffortExplicit)
+                    {
+                        continue;
+                    }
+                    var field = typeof(RDPilotApplication).GetField(
+                        name,
+                        System.Reflection.BindingFlags.Static |
+                        System.Reflection.BindingFlags.NonPublic);
+                    field?.SetValue(null, value);
                 }
             }
         
@@ -1199,6 +1589,21 @@ internal static partial class RDPilotApplication
                 else
                     Console.Error.WriteLine($"Invalid text verbosity '{value}' from {source}; expected low, medium, or high.");
             }
+
+            internal static void ApplyGoalMode(string? value, string source)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return;
+
+                var normalized = NormalizeGoalMode(value);
+                if (normalized is "auto" or "finite" or "continuous")
+                    GoalMode = normalized;
+                else
+                    Console.Error.WriteLine($"Invalid goal mode '{value}' from {source}; expected auto, finite, or continuous.");
+            }
+
+            static string NormalizeGoalMode(string? value) =>
+                value?.Trim().ToLowerInvariant() ?? "auto";
         
             internal static void ApplyImageFormat(string? value, string source)
             {

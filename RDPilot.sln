@@ -5,6 +5,8 @@ VisualStudioVersion = 17.14.36408.4
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RDPilot", "RDPilot\RDPilot.csproj", "{F3720DB3-38BD-45EC-BAF3-B8A3EFB8E9E0}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RDPilot.SelfTests", "RDPilot.SelfTests\RDPilot.SelfTests.csproj", "{8D35D7E4-61B6-4B50-A9D2-BC4AD3C84992}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{F3720DB3-38BD-45EC-BAF3-B8A3EFB8E9E0}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F3720DB3-38BD-45EC-BAF3-B8A3EFB8E9E0}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F3720DB3-38BD-45EC-BAF3-B8A3EFB8E9E0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8D35D7E4-61B6-4B50-A9D2-BC4AD3C84992}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8D35D7E4-61B6-4B50-A9D2-BC4AD3C84992}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8D35D7E4-61B6-4B50-A9D2-BC4AD3C84992}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8D35D7E4-61B6-4B50-A9D2-BC4AD3C84992}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

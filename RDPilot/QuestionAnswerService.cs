@@ -43,7 +43,7 @@ internal static partial class RDPilotApplication
                     if (AutoHideConsoleDuringRun && IsOwnConsoleForeground())
                         consoleHidden = ConcealConsoleWindow();
         
-                    var (dataUrl, savedPath, screenW, screenH, imageW, imageH, _, _, focusUiaRect, focusUiaSummary, focusUiaDataUrl, focusUiaPath, _) =
+                    var (dataUrl, savedPath, screenW, screenH, imageW, imageH, _, _, focusUiaRect, focusUiaSummary, focusUiaDataUrl, focusUiaPath, _, _) =
                         ScreenshotToDataUrl(screensDir, commandId, 1, null);
                     dataUrl = DownscaleDataUrlForHelperCall(dataUrl, savedPath, QaScreenshotMaxWidth);
                     (imageW, imageH) = HelperImageSize(savedPath, imageW, imageH, QaScreenshotMaxWidth);

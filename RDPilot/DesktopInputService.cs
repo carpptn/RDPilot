@@ -5,9 +5,20 @@ internal static partial class RDPilotApplication
     /// </summary>
     internal static class DesktopInputService
     {
-            // PRIMARY screen
+            // Controlled desktop region. Multi-monitor capture is opt-in because
+            // it increases image size and may expose unrelated secondary screens.
             internal static (int X, int Y, int W, int H) GetPrimaryScreen()
             {
+                if (MultiMonitorEnabled)
+                {
+                    var x = GetSystemMetrics((int)SystemMetric.SM_XVIRTUALSCREEN);
+                    var y = GetSystemMetrics((int)SystemMetric.SM_YVIRTUALSCREEN);
+                    var width = GetSystemMetrics((int)SystemMetric.SM_CXVIRTUALSCREEN);
+                    var height = GetSystemMetrics((int)SystemMetric.SM_CYVIRTUALSCREEN);
+                    if (width > 0 && height > 0)
+                        return (x, y, width, height);
+                }
+
                 int w = GetSystemMetrics((int)SystemMetric.SM_CXSCREEN);
                 int h = GetSystemMetrics((int)SystemMetric.SM_CYSCREEN);
                 return (0, 0, w, h);
@@ -25,11 +36,35 @@ internal static partial class RDPilotApplication
                 int relY = Math.Max(0, Math.Min(vh - 1, p.Y - vy));
                 double nx = vw > 1 ? (double)relX / (vw - 1) : 0.0;
                 double ny = vh > 1 ? (double)relY / (vh - 1) : 0.0;
-                return (relX, relY, nx, ny);
+                return (vx + relX, vy + relY, nx, ny);
             }
         
-            internal static void SetCurrentScreenMap(int screenW, int screenH, int imageW, int imageH) =>
-                CurrentScreenMap = ScreenCoordinateMapper.Create(screenW, screenH, imageW, imageH);
+            internal static void SetCurrentScreenMap(int screenW, int screenH, int imageW, int imageH)
+            {
+                var (screenX, screenY, _, _) = GetPrimaryScreen();
+                CurrentScreenMap = ScreenCoordinateMapper.Create(
+                    screenX,
+                    screenY,
+                    screenW,
+                    screenH,
+                    imageW,
+                    imageH);
+            }
+
+            internal static void SetCurrentScreenMap(
+                int screenX,
+                int screenY,
+                int screenW,
+                int screenH,
+                int imageW,
+                int imageH) =>
+                CurrentScreenMap = ScreenCoordinateMapper.Create(
+                    screenX,
+                    screenY,
+                    screenW,
+                    screenH,
+                    imageW,
+                    imageH);
         
             internal static Rectangle? ScreenRectToImage(Rectangle? rect) =>
                 rect.HasValue ? CurrentScreenMap.ScreenToImageRect(rect.Value) : null;
@@ -49,7 +84,7 @@ internal static partial class RDPilotApplication
             {
                 var imageRect = RectFromBBox(box);
                 var screenRect = CurrentScreenMap.ImageToScreenRect(imageRect);
-                return CurrentScreenMap.IsScaled
+                return CurrentScreenMap.RequiresMapping
                     ? $"bbox={FormatImageRect(imageRect)}→screen{FormatImageRect(screenRect)}"
                     : $"bbox=({screenRect.Left},{screenRect.Top})–({screenRect.Right},{screenRect.Bottom})";
             }
@@ -57,7 +92,7 @@ internal static partial class RDPilotApplication
             internal static string FormatActionPoint(int imageX, int imageY)
             {
                 var screenPoint = CurrentScreenMap.ImageToScreenPoint(imageX, imageY);
-                return CurrentScreenMap.IsScaled
+                return CurrentScreenMap.RequiresMapping
                     ? $"({imageX},{imageY})→screen({screenPoint.X},{screenPoint.Y})"
                     : $"({screenPoint.X},{screenPoint.Y})";
             }
@@ -72,6 +107,14 @@ internal static partial class RDPilotApplication
                 if (a.Type == "paste_text") return $"paste_text ({a.Text?.Length ?? 0} chars)";
                 if (a.Type == "focus_uia") return $"focus_uia #{a.UiaIndex}";
                 if (a.Type == "click_uia") return $"click_uia #{a.UiaIndex}";
+                if (a.Type == "drag_drop")
+                {
+                    if (!HasExplicitPoint(a) || !HasExplicitDropPoint(a))
+                        return "drag_drop (missing source or destination)";
+                    var source = ResolvePoint(a);
+                    var destination = ResolveDropPoint(a);
+                    return $"drag_drop ({source.X},{source.Y})→({destination.X},{destination.Y}) {a.Button ?? "left"} {EffectiveDragDurationMs(a)}ms";
+                }
         
                 // request_crop / point
                 if (a.Type is "request_crop" or "point")
@@ -166,11 +209,23 @@ internal static partial class RDPilotApplication
         
                 if (t == "open_url") return $"open_url:{a.Url}";
                 if (t == "launch_app") return $"launch_app:{a.App}";
-                if (t == "run_command") return "run_command";
-                if (t == "paste_text") return "paste_text";
+                if (t == "run_command")
+                    return $"run_command:{StableSensitiveSignature(a.Command)}:{StableActionContext(a)}";
+                if (t == "paste_text")
+                    return $"paste_text:{StableSensitiveSignature(a.Text)}:{StableActionContext(a)}";
                 if (t is "focus_uia" or "click_uia") return $"{t}:{a.UiaIndex}";
+                if (t == "drag_drop")
+                {
+                    if (!HasExplicitPoint(a) || !HasExplicitDropPoint(a))
+                        return "drag_drop:missing";
+                    var source = ResolvePoint(a);
+                    var destination = ResolveDropPoint(a);
+                    var cluster = Math.Max(16, IneffectiveMouseClusterPx);
+                    return $"drag_drop:{source.X / cluster},{source.Y / cluster}->{destination.X / cluster},{destination.Y / cluster}";
+                }
                 if (t == "keys") return $"keys:{string.Join("+", (a.Keys ?? Array.Empty<string>()).Select(k => k.ToLowerInvariant()))}";
-                if (t == "type_text") return "type_text";
+                if (t == "type_text")
+                    return $"type_text:{StableSensitiveSignature(a.Text)}:{StableActionContext(a)}";
                 if (t == "scroll") return $"scroll:{a.ScrollDy ?? 0}";
                 if (t == "wait") return $"wait:{EffectiveWaitSeconds(a, out _)}";
         
@@ -212,23 +267,200 @@ internal static partial class RDPilotApplication
         
                 return t;
             }
+
+            static string StableSensitiveSignature(string? value)
+            {
+                if (string.IsNullOrEmpty(value))
+                    return "empty";
+                var hash = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+                return Convert.ToHexString(hash.AsSpan(0, 6)).ToLowerInvariant();
+            }
+
+            static string StableActionContext(ActionDto action)
+            {
+                var tokens = ActionSemanticTokens(action);
+                return string.IsNullOrWhiteSpace(tokens)
+                    ? "unspecified-target"
+                    : StableSensitiveSignature(tokens);
+            }
         
             internal static string IneffectiveActionSignature(ActionDto a)
             {
                 if (a == null || string.IsNullOrEmpty(a.Type))
                     return "null";
-        
-                var t = a.Type.ToLowerInvariant();
-                if (t is "click" or "double_click" or "move")
-                {
-                    var p = ResolvePoint(a);
-                    var cluster = Math.Max(16, IneffectiveMouseClusterPx);
-                    var cx = (p.X / cluster) * cluster;
-                    var cy = (p.Y / cluster) * cluster;
-                    return $"mouse:{cx},{cy}";
-                }
-        
                 return ActionSignature(a);
+            }
+
+            internal static ResolvedActionSnapshot CaptureResolvedAction(ActionDto action, Rectangle? clickContextRect)
+            {
+                Point? screenPoint = null;
+                Point? destinationScreenPoint = null;
+                string? validationError = ValidateActionCoordinates(action);
+                if (validationError is null && action.Type is ("click" or "double_click"))
+                {
+                    var p = ResolveClickPoint(action, clickContextRect, logAdjustment: false);
+                    screenPoint = new Point(p.X, p.Y);
+                }
+                else if (validationError is null && action.Type == "move")
+                {
+                    var p = ResolvePoint(action);
+                    screenPoint = new Point(p.X, p.Y);
+                }
+                else if (validationError is null && action.Type == "drag_drop")
+                {
+                    var source = ResolvePoint(action);
+                    var destination = ResolveDropPoint(action);
+                    screenPoint = new Point(source.X, source.Y);
+                    destinationScreenPoint = new Point(destination.X, destination.Y);
+                }
+
+                string description;
+                string signature;
+                try { description = Describe(action); }
+                catch { description = $"{action.Type} (invalid parameters)"; }
+                try { signature = validationError is null ? IneffectiveActionSignature(action) : $"{action.Type}:invalid"; }
+                catch { signature = $"{action.Type}:invalid"; }
+
+                return new ResolvedActionSnapshot(
+                    action,
+                    description,
+                    signature,
+                    screenPoint)
+                {
+                    DestinationScreenPoint = destinationScreenPoint,
+                    SemanticTokens = ActionSemanticTokens(action),
+                    ValidationError = validationError
+                };
+            }
+
+            internal static string? ValidateActionCoordinates(ActionDto action)
+            {
+                if (action.BBox is not null && !IsValidBox(action.BBox))
+                    return "bbox must have complete coordinates with right > left and bottom > top.";
+                if (action.ToBBox is not null && !IsValidBox(action.ToBBox))
+                    return "to_bbox must have complete coordinates with right > left and bottom > top.";
+                if (action.Crop is not null && !IsValidBox(action.Crop))
+                    return "crop must have complete coordinates with right > left and bottom > top.";
+                if (action.BBox is not null && !BoxFitsCurrentImage(action.BBox))
+                    return "bbox must stay inside the current screenshot.";
+                if (action.ToBBox is not null && !BoxFitsCurrentImage(action.ToBBox))
+                    return "to_bbox must stay inside the current screenshot.";
+                if (action.Crop is not null && !BoxFitsCurrentImage(action.Crop))
+                    return "crop must stay inside the current screenshot.";
+
+                var sourceNormalizedError = ValidateNormalizedPair(action.X, action.Y, "x/y");
+                if (sourceNormalizedError is not null)
+                    return sourceNormalizedError;
+                var destinationNormalizedError = ValidateNormalizedPair(action.ToX, action.ToY, "to_x/to_y");
+                if (destinationNormalizedError is not null)
+                    return destinationNormalizedError;
+                var sourcePixelError = ValidatePixelPair(
+                    action.XPx,
+                    action.YPx,
+                    CurrentScreenMap.ImageW,
+                    CurrentScreenMap.ImageH,
+                    "x_px/y_px");
+                if (sourcePixelError is not null)
+                    return sourcePixelError;
+                var destinationPixelError = ValidatePixelPair(
+                    action.ToXPx,
+                    action.ToYPx,
+                    CurrentScreenMap.ImageW,
+                    CurrentScreenMap.ImageH,
+                    "to_x_px/to_y_px");
+                if (destinationPixelError is not null)
+                    return destinationPixelError;
+
+                if (action.Type is "click" or "double_click" or "move" &&
+                    !HasExplicitPoint(action))
+                {
+                    return $"{action.Type} requires bbox, x_px/y_px, or x/y.";
+                }
+
+                if (action.Type == "drag_drop")
+                {
+                    if (!HasExplicitPoint(action))
+                        return "drag_drop requires a valid source bbox, x_px/y_px, or x/y.";
+                    if (!HasExplicitDropPoint(action))
+                        return "drag_drop requires a valid destination to_bbox, to_x_px/to_y_px, or to_x/to_y.";
+                    var source = ResolvePoint(action);
+                    var destination = ResolveDropPoint(action);
+                    var dx = (long)source.X - destination.X;
+                    var dy = (long)source.Y - destination.Y;
+                    if (dx * dx + dy * dy < 16)
+                        return "drag_drop source and destination are effectively identical.";
+                }
+
+                return null;
+            }
+
+            static string? ValidateNormalizedPair(
+                double? x,
+                double? y,
+                string label)
+            {
+                if (x.HasValue != y.HasValue)
+                    return $"{label} must be supplied as a complete pair.";
+                if (!x.HasValue)
+                    return null;
+                if (!double.IsFinite(x.Value) ||
+                    !double.IsFinite(y!.Value) ||
+                    x.Value is < 0 or > 1 ||
+                    y.Value is < 0 or > 1)
+                {
+                    return $"{label} must contain finite values in the 0..1 range.";
+                }
+                return null;
+            }
+
+            static string? ValidatePixelPair(
+                int? x,
+                int? y,
+                int width,
+                int height,
+                string label)
+            {
+                if (x.HasValue != y.HasValue)
+                    return $"{label} must be supplied as a complete pair.";
+                if (!x.HasValue)
+                    return null;
+                if (x.Value < 0 ||
+                    y!.Value < 0 ||
+                    x.Value >= Math.Max(1, width) ||
+                    y.Value >= Math.Max(1, height))
+                {
+                    return $"{label} must stay inside the current screenshot.";
+                }
+                return null;
+            }
+
+            static bool BoxFitsCurrentImage(BBox box) =>
+                IsValidBox(box) &&
+                box.Left >= 0 &&
+                box.Top >= 0 &&
+                box.Right <= CurrentScreenMap.ImageW &&
+                box.Bottom <= CurrentScreenMap.ImageH;
+
+            internal static bool IsValidBox(BBox box) =>
+                box is { Left: { } left, Top: { } top, Right: { } right, Bottom: { } bottom } &&
+                right > left &&
+                bottom > top;
+
+            static string ActionSemanticTokens(ActionDto action)
+            {
+                var raw = action.Note ?? "";
+                if (action.UiaIndex is int index)
+                {
+                    var target = CurrentUiaTargets.FirstOrDefault(item => item.Index == index);
+                    if (target is not null)
+                        raw += $" {target.Name} {target.ControlType}";
+                }
+                return string.Join(' ', Regex.Matches(raw.ToLowerInvariant(), @"[\p{L}\p{Nd}]{2,}")
+                    .Cast<Match>()
+                    .Select(match => match.Value)
+                    .Where(token => !int.TryParse(token, out _))
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(20));
             }
         
             internal static Rectangle? ResolveAimRect(ActionDto a)
@@ -269,8 +501,12 @@ internal static partial class RDPilotApplication
                 return null;
             }
         
-            internal static Rectangle RectFromBBox(BBox b) =>
-                Rectangle.FromLTRB(b.Left!.Value, b.Top!.Value, b.Right!.Value, b.Bottom!.Value);
+            internal static Rectangle RectFromBBox(BBox b)
+            {
+                if (!IsValidBox(b))
+                    throw new InvalidOperationException("Invalid bbox: right must be greater than left and bottom greater than top.");
+                return Rectangle.FromLTRB(b.Left!.Value, b.Top!.Value, b.Right!.Value, b.Bottom!.Value);
+            }
         
             // ===== Action execution =====
             [DllImport("user32.dll")] internal static extern bool SetCursorPos(int x, int y);
@@ -348,6 +584,13 @@ internal static partial class RDPilotApplication
                                 var (x, y) = ResolveClickPoint(action, clickContextRect, logAdjustment: true);
                                 SetCursorPos(x, y);
                                 MouseDoubleClick(action.Button ?? "left");
+                                break;
+                            }
+                        case "drag_drop":
+                            {
+                                var source = ResolvePoint(action);
+                                var destination = ResolveDropPoint(action);
+                                MouseDragDrop(source, destination, action.Button ?? "left", EffectiveDragDurationMs(action));
                                 break;
                             }
                         case "keys":
@@ -489,6 +732,27 @@ internal static partial class RDPilotApplication
                     Console.WriteLine($"[click] adjusted edge AIM click ({point.X},{point.Y}) -> ({adjusted.X},{adjusted.Y})");
                 return adjusted;
             }
+
+            internal static (int X, int Y) ResolveDropPoint(ActionDto action)
+            {
+                if (action.ToBBox is { Left: { }, Top: { }, Right: { }, Bottom: { } })
+                {
+                    var rect = CurrentScreenMap.ImageToScreenRect(RectFromBBox(action.ToBBox));
+                    return ClampPoint(rect.Left + rect.Width / 2, rect.Top + rect.Height / 2);
+                }
+                if (action.ToXPx.HasValue && action.ToYPx.HasValue)
+                {
+                    var point = CurrentScreenMap.ImageToScreenPoint(action.ToXPx.Value, action.ToYPx.Value);
+                    return ClampPoint(point.X, point.Y);
+                }
+                if (action.ToX.HasValue && action.ToY.HasValue)
+                {
+                    var point = NormalizedToPixels(action.ToX.Value, action.ToY.Value);
+                    return ClampPoint(point.X, point.Y);
+                }
+
+                throw new InvalidOperationException("Missing drag destination (to_bbox or to_x_px/to_y_px or to_x/to_y).");
+            }
         
             internal static bool ShouldAdjustEdgeClick((int X, int Y) point, Rectangle region)
             {
@@ -529,9 +793,17 @@ internal static partial class RDPilotApplication
             }
         
             internal static bool HasExplicitPoint(ActionDto a) =>
-                (a.BBox is { Left: not null, Top: not null, Right: not null, Bottom: not null })
+                (a.BBox is not null && IsValidBox(a.BBox))
                 || (a.XPx is not null && a.YPx is not null)
                 || (a.X is not null && a.Y is not null);
+
+            internal static bool HasExplicitDropPoint(ActionDto action) =>
+                (action.ToBBox is not null && IsValidBox(action.ToBBox))
+                || (action.ToXPx is not null && action.ToYPx is not null)
+                || (action.ToX is not null && action.ToY is not null);
+
+            internal static int EffectiveDragDurationMs(ActionDto action) =>
+                Math.Clamp(action.DragDurationMs ?? 500, 100, 3000);
         
             internal static (int X, int Y) NormalizedToPixels(double nx, double ny)
             {
@@ -544,13 +816,7 @@ internal static partial class RDPilotApplication
             // ==== Mouse ====
             internal static void MouseClick(string button)
             {
-                uint down, up;
-                switch ((button ?? "left").ToLowerInvariant())
-                {
-                    case "right": down = 0x0008; up = 0x0010; break;
-                    case "middle": down = 0x0020; up = 0x0040; break;
-                    default: down = 0x0002; up = 0x0004; break; // left
-                }
+                var (down, up) = MouseButtonFlags(button);
                 var inputs = new INPUT[]
                 {
                     new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = down } } },
@@ -558,6 +824,72 @@ internal static partial class RDPilotApplication
                 };
                 SendInputWithRetry(inputs, "mouse click");
             }
+
+            internal static void MouseDragDrop(
+                (int X, int Y) source,
+                (int X, int Y) destination,
+                string button,
+                int durationMs)
+            {
+                var (down, up) = MouseButtonFlags(button);
+                if (!SetCursorPos(source.X, source.Y))
+                    throw new InvalidOperationException($"Could not position cursor at drag source ({source.X},{source.Y}).");
+
+                var pressed = false;
+                Exception? dragFailure = null;
+                try
+                {
+                    SendInputWithRetry(
+                        [new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = down } } }],
+                        "drag button down");
+                    pressed = true;
+                    Thread.Sleep(80); // Some controls need a short press before motion starts.
+
+                    var effectiveDuration = Math.Clamp(durationMs, 100, 3000);
+                    var steps = Math.Clamp(effectiveDuration / 16, 6, 120);
+                    var delay = Math.Max(1, effectiveDuration / steps);
+                    for (var i = 1; i <= steps; i++)
+                    {
+                        if (CancelRequested)
+                            throw new OperationCanceledException("Drag cancelled by the emergency hotkey.");
+                        var progress = i / (double)steps;
+                        var x = (int)Math.Round(source.X + (destination.X - source.X) * progress);
+                        var y = (int)Math.Round(source.Y + (destination.Y - source.Y) * progress);
+                        if (!SetCursorPos(x, y))
+                            throw new InvalidOperationException($"Could not move cursor during drag to ({x},{y}).");
+                        Thread.Sleep(delay);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    dragFailure = ex;
+                    throw;
+                }
+                finally
+                {
+                    if (pressed)
+                    {
+                        try
+                        {
+                            SendInputWithRetry(
+                                [new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = up } } }],
+                                "drag button up");
+                        }
+                        catch (Exception releaseFailure) when (dragFailure is not null)
+                        {
+                            Console.WriteLine($"[input] drag failed and button release also failed: {releaseFailure.Message}");
+                        }
+                    }
+                }
+            }
+
+            static (uint Down, uint Up) MouseButtonFlags(string? button) =>
+                (button ?? "left").ToLowerInvariant() switch
+                {
+                    "right" => (0x0008u, 0x0010u),
+                    "middle" => (0x0020u, 0x0040u),
+                    _ => (0x0002u, 0x0004u)
+                };
         
             internal static void MouseDoubleClick(string button)
             {

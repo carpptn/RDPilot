@@ -54,14 +54,19 @@ internal static partial class RDPilotApplication
                     if (width <= 0 || height <= 0)
                         return (null, null);
         
+                    var (screenX, screenY, controlledW, controlledH) =
+                        GetPrimaryScreen();
                     if (screenW <= 0 || screenH <= 0)
                     {
-                        var (_, _, w, h) = GetPrimaryScreen();
-                        screenW = w;
-                        screenH = h;
+                        screenW = controlledW;
+                        screenH = controlledH;
                     }
         
-                    var screen = new Rectangle(0, 0, Math.Max(1, screenW), Math.Max(1, screenH));
+                    var screen = new Rectangle(
+                        screenX,
+                        screenY,
+                        Math.Max(1, screenW),
+                        Math.Max(1, screenH));
                     var rect = new Rectangle(wr.Left, wr.Top, width, height);
                     var visible = Rectangle.Intersect(rect, screen);
                     var area = Math.Max(1L, (long)width * height);
@@ -109,6 +114,25 @@ internal static partial class RDPilotApplication
                 catch
                 {
                     return (null, null);
+                }
+            }
+
+            internal static Rectangle? GetActiveWindowRectangle()
+            {
+                try
+                {
+                    var hWnd = GetForegroundWindow();
+                    if (hWnd == IntPtr.Zero || !GetWindowRect(hWnd, out var rect))
+                        return null;
+                    var width = rect.Right - rect.Left;
+                    var height = rect.Bottom - rect.Top;
+                    return width > 0 && height > 0
+                        ? new Rectangle(rect.Left, rect.Top, width, height)
+                        : null;
+                }
+                catch
+                {
+                    return null;
                 }
             }
         
@@ -169,7 +193,8 @@ internal static partial class RDPilotApplication
                 try
                 {
                     var root = GetFocusedWindowElement() ?? AutomationElement.RootElement;
-                    var screen = new Rectangle(0, 0, screenW, screenH);
+                    var (screenX, screenY, _, _) = GetPrimaryScreen();
+                    var screen = new Rectangle(screenX, screenY, screenW, screenH);
                     var walker = TreeWalker.ControlViewWalker;
                     var queue = new Queue<AutomationElement>();
                     var budgetSw = Stopwatch.StartNew();

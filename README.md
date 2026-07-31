@@ -6,7 +6,7 @@
 * Designed for **Windows 10/11**, .NET **9** is required.
 
 
-> ⚠️ Currently RDPilot captures and operates only the primary display.
+> ⚠️ RDPilot captures and operates only the primary display by default. Multi-monitor virtual-desktop control is opt-in with `--multi-monitor`.
 
 ---
 
@@ -35,7 +35,7 @@ open Edge browser, go to Google.com, and search for the term 'life'
 The application first retrieves a **prompt** that defines the goal to be achieved (the task description for the model).  
 
 **2. Initial Screenshot & Model Input**  
-A screenshot (PNG) of the primary screen is captured.  
+A screenshot of the primary screen—or the full virtual desktop when explicitly enabled—is captured.
 - A **white + red rounded focus ring** (from UI Automation) highlights the element that currently has keyboard focus.  
 - An **optional pixel grid overlay** may be added to assist with precise coordinate selection.  
 
@@ -54,6 +54,7 @@ The available actions include:
 - `move`  
 - `click`  
 - `double_click`  
+- `drag_drop`
 - `scroll`  
 - `request_crop`  
 - `point`  
@@ -67,7 +68,7 @@ The application executes the given action via **WinAPI**.
 **5. Iterative Loop**  
 After execution, a new screenshot is generated and sent back to the model.  
 The model decides the next action.  
-This process repeats in a loop until the model returns the `done` action, which signals that the initial task goal (from the prompt) has been achieved.  
+For a finite goal, this process repeats until the model returns `done` and the verifier accepts completion. RDPilot also classifies general open-ended goals—such as monitoring, maintaining a state, reacting to incoming events, continuing work, or operating until the user stops—as `continuous`. The `done` action is removed from the model schema for a continuous goal. Set `--max-steps 0` when the run must remain active until user abort or another configured safety guard stops it.
 
 > The app writes **logs to files**: screenshots, crops/overlays, and request/response JSONs (see *Output & logs*).
 
@@ -83,6 +84,8 @@ Logs are stored in the following folders:
   JSON **request/response** payloads per step (`*_request.json`, `*_response.json`) + verifier requests when the model returns `done`.
 * **`/logs`**
   A per‑run **console log** (`<id>.log`) that mirrors what you see in the terminal.
+* **`/memory`**
+  Shared recovery memory (`recovery-memory.json`), its recovery backup, and loop-calibration telemetry used by later goals and later RDPilot launches.
 
 ---
 
@@ -112,7 +115,7 @@ Logs are stored in the following folders:
 | Purpose                   | Env var                                           | CLI flag                         | Notes |
 | ------------------------- | ------------------------------------------------- | -------------------------------- | ----- |
 | OpenAI API key            | `OPENAI_API_KEY`                                  | —                                | **Required** |
-| Runtime profile           | `RDPILOT_PROFILE=fast/balanced/quality`, `FAST_MODE=1`, `QUALITY_MODE=1` | `--fast` / `--balanced` / `--quality` | Default `fast`; `RDPILOT_PROFILE` overrides mode aliases |
+| Runtime profile           | `RDPILOT_PROFILE=custom/fast/balanced/quality`, `FAST_MODE=1`, `QUALITY_MODE=1` | `--profile <name>`, `--fast` / `--balanced` / `--quality` | Default `custom`, which preserves code defaults; `RDPILOT_PROFILE` overrides mode aliases |
 | Model                     | `OPENAI_MODEL=gpt-5.6-terra`                      | `--model <model>`                | Default `gpt-5.6-terra` |
 | Q&A model                 | `OPENAI_QA_MODEL=<model>`                         | `--qa-model <model>`             | Falls back to `--model` |
 | Verify model              | `OPENAI_VERIFY_MODEL=<model>`                     | `--verify-model <model>`         | Falls back to `--model` |
@@ -120,9 +123,11 @@ Logs are stored in the following folders:
 | Q&A reasoning effort      | `OPENAI_QA_REASONING_EFFORT=low/medium/high/...` | `--qa-effort <effort>`           | Default `low`; `default` means API/model default |
 | Verify reasoning effort   | `OPENAI_VERIFY_REASONING_EFFORT=low/medium/high/...` | `--verify-effort <effort>`   | Default `low`; `default` means API/model default |
 | Mouse actions             | `MOUSE_ENABLED=1/true/yes` or `0/false/no`        | `--mouse` / `--no-mouse`         | Default **on** |
+| Multi-monitor desktop     | `MULTI_MONITOR=1/0`                               | `--multi-monitor` / `--primary-monitor-only` | Default off; opt-in captures and controls the full Windows virtual desktop, including monitors with negative coordinates |
 | Post-action UI delay (ms) | `POST_ACTION_DELAY_MS=###`                        | `--delay <ms>`                   | Default `300` in fast mode |
 | Pixel grid overlay        | `GRID_STEP_PX=###` or `0`                         | `--grid <px>`                    | Default `0`; e.g. `100` for a 100-px grid |
-| Max control steps         | `MAX_STEPS=###`                                   | `--max-steps <n>`                | Default `10000`; hard cap for one control-loop goal |
+| Max control steps         | `MAX_STEPS=###`                                   | `--max-steps <n>`                | Default `10000`; `0` removes the step limit for genuinely open-ended goals |
+| Goal mode                 | `GOAL_MODE=auto/finite/continuous`                | `--goal-mode <mode>`             | Default `auto`; explicitly overrides heuristic classification when a goal is ambiguous |
 | Max wait duration         | `MAX_WAIT_SECONDS=###`                            | `--max-wait <seconds>`           | Default `30` in fast mode; `0` disables capping |
 | Output token cap          | `MAX_OUTPUT_TOKENS=###`                           | `--max-output-tokens <n>`        | Default `300` in fast mode |
 | Q&A output token cap      | `QA_MAX_OUTPUT_TOKENS=###`                        | `--qa-max-output-tokens <n>`     | Default `300` in fast mode |
@@ -137,8 +142,21 @@ Logs are stored in the following folders:
 | Stagnation guard          | `MAX_STAGNATION_STEPS=###`                        | `--max-stagnation <n>`           | Default `8` in fast mode; `0` disables |
 | Repeated action guard     | `MAX_REPEATED_ACTIONS=###`                        | `--max-repeated-actions <n>`     | Default `5` in fast mode; `0` disables |
 | Repeat cooldown           | `ACTION_REPEAT_COOLDOWN_STEPS=###`                | `--repeat-cooldown <n>`          | Default `2` in fast mode; temporarily blocks identical ineffective UI actions |
+| Rejected-proposal guard   | `MAX_REJECTED_PROPOSAL_REPEATS=###`               | `--max-rejected-proposals <n>`   | Default `5`; detects direct and multi-step cycles of model actions rejected by local policy; `0` disables |
+| Proactive loop confidence | `PROACTIVE_LOOP_CONFIDENCE_THRESHOLD=0.5..1.0`   | `--loop-confidence-threshold <n>` | Default `0.75`; higher values reduce false-positive multi-step loop detection |
 | Model failure guard       | `MAX_MODEL_FAILURES=###`                          | `--max-model-failures <n>`       | Default `2` in fast mode; keeps transient API failures from aborting immediately |
 | Local action failure guard | `MAX_ACTION_FAILURES=###`                        | `--max-action-failures <n>`      | Default `2` in fast mode; feeds executor failures back to the model before aborting |
+| Recovery memory          | `RECOVERY_MEMORY=1/0`                             | `--recovery-memory` / `--no-recovery-memory` | Default on; learns durable strategies that escaped previous loops |
+| Recovery memory tuning   | `RECOVERY_MEMORY_TRIGGER_STEPS`, `RECOVERY_MEMORY_VALIDATION_STEPS`, `RECOVERY_MEMORY_FAILURE_LIMIT`, `RECOVERY_MEMORY_MAX_LESSONS`, `RECOVERY_MEMORY_PROMPT_LESSONS` | `--recovery-trigger <n>`, `--recovery-validation <n>`, `--recovery-failure-limit <n>`, `--recovery-max-lessons <n>`, `--recovery-prompt-lessons <n>` | Defaults `2/2/3/500/2`; a lesson is quarantined after 3 consecutive confirmed failures |
+| Recovery diversity/retention | `RECOVERY_MEMORY_MAX_QUARANTINED_LESSONS`, `RECOVERY_MEMORY_RESERVED_LESSONS_PER_CONTEXT`, `RECOVERY_MEMORY_SOFT_MAX_LESSONS_PER_CONTEXT` | `--recovery-max-quarantined <n>`, `--recovery-reserved-per-context <n>`, `--recovery-soft-max-per-context <n>` | Defaults `500/5/100`; protects strong lessons from each application/domain while allowing unused capacity to be shared |
+| Recovery file/archive limits | `RECOVERY_MEMORY_MAX_FILE_BYTES`, `RECOVERY_MEMORY_ARCHIVE_PATH`, `RECOVERY_MEMORY_ARCHIVE_MAX_BYTES`, `RECOVERY_MEMORY_ARCHIVE_RETAINED_FILES` | `--recovery-max-file-bytes <n>`, `--recovery-archive-path <path>`, `--recovery-archive-max-bytes <n>`, `--recovery-archive-retained-files <n>` | Defaults `32 MiB`, `memory\recovery-memory-archive.json`, `32 MiB`, and 3 rotated archive files |
+| Recovery memory path     | `RECOVERY_MEMORY_PATH=<path>`                     | `--recovery-memory-path <path>`  | Default `memory\recovery-memory.json` next to `RDPilot.exe` |
+| Recovery progress verifier | `RECOVERY_PROGRESS_VERIFICATION=1/0`, `RECOVERY_PROGRESS_CONFIDENCE_THRESHOLD=0.5..1.0` | `--recovery-progress-verification` / `--no-recovery-progress-verification`, `--recovery-progress-confidence <n>` | Default on at `0.68`; independently checks before/after evidence before a strategy is learned |
+| Runtime loop-state bounds | `RUNTIME_SEMANTIC_STATE_LIMIT`, `RUNTIME_GRAPH_EDGE_LIMIT`, `RUNTIME_RECOVERY_ACTION_LIMIT`, `RUNTIME_COOLDOWN_ENTRY_LIMIT`, `GRAPH_CANDIDATE_TTL_STEPS` | `--runtime-semantic-states <n>`, `--runtime-graph-edges <n>`, `--runtime-recovery-actions <n>`, `--runtime-cooldowns <n>`, `--graph-candidate-ttl <n>` | Defaults `256/512/64/256/24`; keeps unlimited control runs memory-bounded |
+| Loop telemetry retention | `RECOVERY_TELEMETRY_MAX_BYTES`, `RECOVERY_TELEMETRY_RETAINED_FILES` | `--recovery-telemetry-max-bytes <n>`, `--recovery-telemetry-retained-files <n>` | Defaults `5 MiB` and `3`; rotates contextual calibration telemetry |
+| Replay corpus learning   | `LOOP_REPLAY_AUTO_EXPORT=1/0`, `LOOP_REPLAY_CORPUS_PATH=<path>` | `--loop-replay-auto-export` / `--no-loop-replay-auto-export`, `--loop-replay-corpus <path>` | Default on; maintains `memory\loop-replay-corpus.json` from labelled real-run telemetry |
+| Independent replay labels | —                                                | `--loop-replay-import <corpus.json>` | Validates and merges manually reviewed cases whose `labelSource` is non-empty and does not start with `telemetry:` |
+| Recovery memory tools    | —                                                  | `--memory-list`, `--memory-prune`, `--memory-export <path>` | Inspect reliability/calibration, apply retention, or export the versioned JSON without requiring an API key |
 | Screen polling            | `SCREEN_POLLING=1/0`                              | `--screen-polling` / `--no-screen-polling` | Default on; waits for visual stability instead of only fixed sleeps |
 | Screen poll timing        | `SCREEN_POLL_INITIAL_DELAY_MS`, `SCREEN_POLL_INTERVAL_MS`, `SCREEN_POLL_TIMEOUT_MS` | `--screen-poll-initial-delay <ms>`, `--screen-poll-interval <ms>`, `--screen-poll-timeout <ms>` | Defaults `120/150/1200` in fast mode |
 | Extra unchanged wait      | `WAIT_NO_CHANGE_EXTRA_MS=###`                     | `--wait-no-change-extra <ms>`    | Default `750`; used when a `wait` action leaves the screen unchanged |
@@ -191,6 +209,8 @@ Logs are stored in the following folders:
 | Log analysis              | —                                                 | `--analyze-logs`                 | Summarizes saved responses, screenshots, and logs |
 | Response replay           | —                                                 | `--replay-response <path>`       | Parses a saved response and shows safe follow-up candidates |
 | Request replay            | —                                                 | `--replay-request <path>` / `--replay-request-dry-run` | Rehydrates saved request logs from `file://` images; dry-run validates without API key |
+| Loop-detector replay      | —                                                 | `--loop-replay <corpus.json>`    | Runs labelled fingerprint sequences offline and reports TP/FP/TN/FN, precision, and recall |
+| Replay corpus export      | —                                                 | `--loop-replay-export <corpus.json>` | Rebuilds/merges a replay corpus from current and rotated loop telemetry without an API key |
 
 ---
 
@@ -223,8 +243,29 @@ Example:
   "maxStagnationSteps": 8,
   "maxRepeatedActions": 5,
   "actionRepeatCooldownSteps": 2,
+  "proactiveLoopConfidenceThreshold": 0.75,
   "maxModelFailures": 2,
   "maxActionFailures": 2,
+  "goalMode": "auto",
+  "recoveryMemory": true,
+  "recoveryMemoryTriggerSteps": 2,
+  "recoveryMemoryValidationSteps": 2,
+  "recoveryMemoryFailureLimit": 3,
+  "recoveryMemoryMaxLessons": 500,
+  "recoveryMemoryMaxQuarantinedLessons": 500,
+  "recoveryMemoryReservedLessonsPerContext": 5,
+  "recoveryMemorySoftMaxLessonsPerContext": 100,
+  "recoveryMemoryMaxFileBytes": 33554432,
+  "recoveryMemoryArchivePath": "memory\\recovery-memory-archive.json",
+  "recoveryMemoryArchiveMaxBytes": 33554432,
+  "recoveryMemoryArchiveRetainedFiles": 3,
+  "recoveryMemoryPromptLessons": 2,
+  "recoveryProgressVerification": true,
+  "recoveryProgressConfidenceThreshold": 0.68,
+  "recoveryTelemetryMaxBytes": 5242880,
+  "recoveryTelemetryRetainedFiles": 3,
+  "loopReplayAutoExport": true,
+  "loopReplayCorpusPath": "memory\\loop-replay-corpus.json",
   "screenPolling": true,
   "screenPollInitialDelayMs": 120,
   "screenPollIntervalMs": 150,
@@ -274,6 +315,7 @@ Example:
 
 ## Profiles
 
+* `custom` (default): preserves the values initialized in code unless config, environment variables, or CLI flags override them.
 * `fast`: `effort=low`, JPEG screenshots downscaled to 1280px, 640px full-screen overview when a focus crop is sent, JPEG crops up to 768px, JPEG screen logs up to 1280px, short output, short step history, adaptive verify, no debug overlays.
 * `balanced`: JPEG screenshots up to 1600px, JPEG crops up to 1024px, JPEG screen logs up to 1600px, focus UIA crop enabled, short output, medium step history.
 * `quality`: original PNG screenshots and crops, original PNG screen logs, focus UIA crop, debug overlays, longer step history, verifier always on, `effort=medium`.
@@ -345,12 +387,35 @@ Keyboard shortcuts are batched into a single virtual-key `SendInput` sequence wh
 Simple key sequences such as repeated `tab` plus `enter` are also batched into one `SendInput` call when all keys map to virtual keys.
 Common key-name aliases such as `pgdn`, `del`, `ins`, and `arrowleft` are accepted to avoid aborting a run over naming differences.
 
-Loop guards stop runs that keep sending expensive model calls without visible progress. Set `--max-stagnation 0` or `--max-repeated-actions 0` for long workflows that are expected to look unchanged for many steps. Long `wait` actions are capped by `--max-wait`, and the action schema advertises that cap to the model.
+Loop guards stop runs that keep sending expensive model calls without visible progress. A separate proposal-level detector catches direct and multi-step cycles made only of actions rejected by local policy, so those loops cannot disappear merely because no input reached the desktop. Rejected-proposal history is cleared only after a non-observation action produces visible progress; `aim`, `point`, `request_crop`, or another ineffective action can no longer hide an alternating planning loop. For a `continuous` goal, an unchanged screen after an intentional `wait` is tracked as healthy idle time and does not increment stagnation or repeated-action guards; ineffective clicks, text input, navigation, and other mutations remain fully guarded. Set `--max-stagnation 0` or `--max-repeated-actions 0` only when a non-wait workflow genuinely needs it. Long `wait` actions are capped by `--max-wait`, and the action schema advertises that cap to the model.
 Repeated-action detection distinguishes different `request_crop`/`point` regions, so useful visual refinement is not mistaken for the same ineffective action.
 Mouse clicks and double-clicks that land in the same small screen region are also clustered for repeat detection, so tiny coordinate changes do not let the model keep retrying an ineffective click.
+Recovery memory is enabled by default and stored in the versioned `memory\recovery-memory.json` next to the running executable, so it is shared by later goals and application launches. Writes use a cross-process lock, merge-on-write, retry-on-later-step, atomic replacement, and `recovery-memory.json.bak`; a corrupt primary file is restored from the backup. Success, failure, selection, reward, and reward-observation statistics use merge-safe per-writer components that are periodically compacted without losing totals. It starts an episode after repeated no-progress actions, a rejected-proposal cycle, or an earlier detected visual recurrence, and independently verifies before/after goal progress before learning a success.
+
+Retention keeps up to 500 active and 500 quarantined lessons by default. Selection first reserves strong lessons for each combined application/domain context, then fills the remaining capacity by contextual-bandit value; the per-context maximum is soft, so unused capacity is not wasted. Lessons displaced from bounded quarantine or by the primary 32 MiB file limit are written to `recovery-memory-archive.json` instead of being immediately discarded. The archive is size-bounded and rotated, providing several generations of recoverable cold history without allowing unlimited disk growth.
+
+Loop detection maintains bounded visual and semantic state histories with action-labelled transitions. Semantic keys, graph edges, recovery actions, and cooldowns have explicit runtime limits, and pending graph candidates expire or yield to a candidate from a new context. It can detect fixed or variable-length cycles such as `A → B → C → A`, including broader semantic cycles whose pixels vary. For continuous goals with explicit recurring-workflow intent, a changing, observation-oriented state return can be classified as a productive cycle rather than a harmful loop; unchanged cycles and cycles containing drag/drop, text entry, commands, or application/navigation launches remain guarded. Process, window title, focused UIA context, foreground/full-screen fingerprints, action family/target, intervening state changes, repeat periods, and per-pixel instability masks protect against false positives from animation. Calibration is contextual by loop kind, interaction domain, topology, process, and finite/continuous goal mode. The first actionable threshold crossing is never used as its own positive label; only a later matching recurrence confirms it. Expired, displaced, intervened, and productive candidates are recorded as `inconclusive` and do not affect confirmed/rejected precision. Decisions and replay-safe observations are written to rotating `loop-telemetry.jsonl` files. Raw action text, keys, window titles, focus text, and semantic targets are redacted or token-hashed before replay telemetry is stored locally.
+
+At the end of each run, telemetry-derived labels are merged into `memory\loop-replay-corpus.json` by default. Confirmed recurrences become positive regression cases; sufficiently long runs with no candidate signal become conservative negative regression cases; ambiguous runs are omitted. Existing manually reviewed cases are preserved. `--loop-replay` reports regression metrics for all cases separately from unbiased accuracy metrics, which use only cases whose `labelSource` is not `telemetry:*`; it explicitly reports when no independent labels are available.
+
+With `--multi-monitor`, screenshots cover the Windows virtual desktop and action coordinates are mapped through its true origin, including negative X/Y coordinates used by monitors placed left of or above the primary display. The model still receives a simple screenshot-local `SCREEN_SIZE` coordinate space. Primary-monitor-only behavior remains the default.
+
+Learned lessons contain goal mode/domain/direction context, interaction domain, loop topology, semantic target tokens, structured strategy steps, preconditions, expected effects, verifier evidence, action cost, reward history, and model/prompt/application provenance. Retrieval uses a contextual-bandit score combining context similarity, reliability, reward, recency, uncertainty, exploration, and cost. Suggested steps carry an explicit strategy ID and sequence number, so success or failure is attributed deterministically instead of guessed from vague text. Repeated confirmed failures move a lesson into quarantine, where it becomes `NEGATIVE_MEMORY`; it can be revived by a later confirmed success or eventually removed by retention. Slow UIs receive a validation window before failure is recorded.
+The `drag_drop` action uses `bbox`/`x_px`/`y_px` for its source and `to_bbox`/`to_x_px`/`to_y_px` for its destination. `drag_duration_ms` is optional (default `500`, range `100..3000`), and all coordinates use the current screenshot's `SCREEN_SIZE` space before being mapped to the real desktop.
+Bounding boxes are validated (`right > left`, `bottom > top`), source and destination must differ, dragging includes a short press-before-motion delay, emergency cancellation is checked during motion, and button release is attempted even after failure.
 Local observation actions are not counted as UI stagnation, avoiding unnecessary adaptive effort escalation after `aim` or crop refinement.
 When the verifier rejects `done`, its reason is promoted into the next control prompt as `LAST_VERIFY_REJECTION` instead of being buried only in the action history.
 When the local delta/repeat guard sees no visible progress, the next prompt includes an explicit strategy hint telling the model not to repeat the same action.
+
+## Self-tests
+
+Run the deterministic regression suite without desktop interaction:
+
+```powershell
+dotnet run --project RDPilot.SelfTests/RDPilot.SelfTests.csproj -c Release
+```
+
+The suite covers malformed and out-of-range actions, primary and negative-origin virtual-desktop coordinate mapping, explicit multi-monitor opt-in, rejected-proposal cycles and progress-based reset policy, unlimited-step configuration, bounded runtime histories, broad graph cycles, productive continuous cycles, candidate expiry and inconclusive calibration, independent calibration, general finite/continuous goal classification and overrides, healthy continuous idle, progress verification, strict strategy attribution, sensitive-input signatures, telemetry-to-replay conversion, independent-label import, goal-aware retrieval, bandit ranking, context-diverse retention, durable overflow archiving, primary file-size enforcement, profile reset behavior, quarantine, counter compaction, concurrent bandit-stat merge semantics, and JSON backup recovery.
 Identical ineffective UI actions can also be put on a short local cooldown, which prevents immediate repeat loops while still allowing a different visible-UI route.
 After a click with little or no visible progress, the next prompt includes a precision hint telling the model not to repeat the same point and to use crop/aim or keyboard expansion for tiny controls, tree expanders, lists, and menus. The hint remains available briefly if an intermediate keyboard attempt also produces no visible progress.
 When local action execution fails, RDPilot records `LAST_EXECUTOR_FAILURE` in the next prompt and gives the model a chance to choose a different action before the action-failure guard stops the run.
@@ -376,6 +441,9 @@ Optional batched follow-ups also skip duplicate action signatures, avoiding repe
 Use `--analyze-logs` to inspect previous runs and find slow calls, runtime metrics, request payload size, prompt text volume, model/token distribution, multi-action responses, largest screenshots, rejected verifier decisions, and HTTP errors.
 The analyzer reports input-token and cached-token totals, making prompt-cache hit rate visible after profile or prompt changes.
 Use `--replay-request <request.json> --replay-request-dry-run` to validate that a saved request can be reconstructed from its screenshot artifacts without touching the desktop. Without dry-run, RDPilot resends the hydrated request to OpenAI and writes a sibling `_replay_response.json`, which helps compare prompt/model/effort changes without operating the real UI.
+Use `--loop-replay <corpus.json>` to evaluate the loop detector without an API key or desktop input. A corpus contains labelled cases, goal mode and recurring-workflow intent, screen dimensions, and ordered frames with base64-encoded screen fingerprints, UI context, optional previous actions, and observed deltas. This provides repeatable precision/recall regression testing as real traces are added.
+Use `--loop-replay-export <corpus.json>` to rebuild that corpus on demand from the retained telemetry. Automatic export is enabled by default and writes to `memory\loop-replay-corpus.json`; use `--no-loop-replay-auto-export` to disable it or `--loop-replay-corpus <path>` to change the destination.
+Use `--loop-replay-import <reviewed-corpus.json>` to merge independently reviewed cases into the default corpus. Imported cases require a stable `name` and a non-telemetry `labelSource`, for example `manual:reviewed`; only these cases contribute to the separate independent accuracy summary.
 
 ---
 

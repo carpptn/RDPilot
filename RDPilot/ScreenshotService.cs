@@ -10,7 +10,7 @@ internal static partial class RDPilotApplication
             internal static (string dataUrl, string? savedPath, int screenW, int screenH, int imageW, int imageH,
                     string? focusDataUrl, Rectangle? focusRect,
                     Rectangle? focusUiaRect, string? focusUiaSummary, string? focusUiaDataUrl, string? focusUiaImagePath,
-                    byte[] deltaFingerprint)
+                    byte[] deltaFingerprint, byte[] activeWindowFingerprint)
                 ScreenshotToDataUrl(string saveDir, string commandId, int step, Rectangle? explicitFocusRect)
             {
                 var screenshotSw = Stopwatch.StartNew();
@@ -32,6 +32,11 @@ internal static partial class RDPilotApplication
         
                 // Delta/polling fingerprints must describe the real screen, not RDPilot's debug overlays.
                 var deltaFingerprint = BuildImageFingerprint(bmp);
+                var activeWindowFingerprint = BuildActiveWindowFingerprint(
+                    bmp,
+                    vx,
+                    vy,
+                    deltaFingerprint);
                 ReportScreenshotSanity(deltaFingerprint, vw, vh);
         
                 using (var g = Graphics.FromImage(bmp))
@@ -72,7 +77,12 @@ internal static partial class RDPilotApplication
                 if (SendFocusCrop && explicitFocusRect is Rectangle rWant)
                 {
                     var rOk = ClampRect(rWant);
-                    using var crop = bmp.Clone(rOk, PixelFormat.Format24bppRgb);
+                    var localCrop = new Rectangle(
+                        rOk.Left - vx,
+                        rOk.Top - vy,
+                        rOk.Width,
+                        rOk.Height);
+                    using var crop = bmp.Clone(localCrop, PixelFormat.Format24bppRgb);
         
                     var cropPath = ScreenLogPath(saveDir, $"{commandId}_{step}_crop");
                     var shareCropLogEncoding = LogScreens && CanShareCropScreenLogEncoding(crop);
@@ -97,7 +107,12 @@ internal static partial class RDPilotApplication
                 var focusUiaRectAbs = focusRectAbs;
                 if (IncludeFocusUia && IncludeFocusUiaCrop && focusUiaRectAbs is Rectangle frAbs2)
                 {
-                    var local = ClampRect(new Rectangle(frAbs2.Left - vx, frAbs2.Top - vy, frAbs2.Width, frAbs2.Height));
+                    var clamped = ClampRect(frAbs2);
+                    var local = new Rectangle(
+                        clamped.Left - vx,
+                        clamped.Top - vy,
+                        clamped.Width,
+                        clamped.Height);
                     if (MaxFocusUiaCropPixels <= 0 || local.Width * local.Height <= MaxFocusUiaCropPixels)
                     {
                         using var crop = bmp.Clone(local, PixelFormat.Format24bppRgb);
@@ -116,7 +131,32 @@ internal static partial class RDPilotApplication
                 screenshotSw.Stop();
                 RunScreenshotCount++;
                 RunScreenshotElapsed += screenshotSw.Elapsed;
-                return (fullDataUrl, fullPath, vw, vh, fullImageW, fullImageH, focusUrl, rect, focusUiaRectAbs, focusUiaSummary, focusUiaDataUrl, focusUiaPath, deltaFingerprint);
+                return (fullDataUrl, fullPath, vw, vh, fullImageW, fullImageH, focusUrl, rect, focusUiaRectAbs, focusUiaSummary, focusUiaDataUrl, focusUiaPath, deltaFingerprint, activeWindowFingerprint);
+            }
+
+            internal static byte[] BuildActiveWindowFingerprint(
+                Bitmap screenshot,
+                int screenOriginX,
+                int screenOriginY,
+                byte[] fallback)
+            {
+                if (IsOwnConsoleForeground())
+                    return fallback.ToArray();
+                var activeRect = GetActiveWindowRectangle();
+                if (activeRect is not Rectangle absolute)
+                    return fallback.ToArray();
+
+                var local = new Rectangle(
+                    absolute.Left - screenOriginX,
+                    absolute.Top - screenOriginY,
+                    absolute.Width,
+                    absolute.Height);
+                local.Intersect(new Rectangle(0, 0, screenshot.Width, screenshot.Height));
+                if (local.Width < 16 || local.Height < 16)
+                    return fallback.ToArray();
+
+                using var crop = screenshot.Clone(local, PixelFormat.Format24bppRgb);
+                return BuildImageFingerprint(crop);
             }
         
             internal static (int W, int H) FullScreenshotRequestImageSize(Bitmap bmp, bool hasFocusCrop)
@@ -145,15 +185,16 @@ internal static partial class RDPilotApplication
                 var (_, _, screenW, screenH) = GetPrimaryScreen();
                 var scaleX = screenW > 0 ? bmp.Width / (double)screenW : 1.0;
                 var scaleY = screenH > 0 ? bmp.Height / (double)screenH : 1.0;
+                var (screenX, screenY, _, _) = GetPrimaryScreen();
         
                 using var penYellow = new Pen(Color.Yellow, 3f) { DashStyle = DashStyle.Dash };
                 using var penBlue = new Pen(Color.DeepSkyBlue, 1.5f) { DashStyle = DashStyle.Dash };
         
                 var r = Rectangle.FromLTRB(
-                    (int)Math.Round(rect.Left * scaleX),
-                    (int)Math.Round(rect.Top * scaleY),
-                    (int)Math.Round((rect.Right - 1) * scaleX),
-                    (int)Math.Round((rect.Bottom - 1) * scaleY));
+                    (int)Math.Round((rect.Left - screenX) * scaleX),
+                    (int)Math.Round((rect.Top - screenY) * scaleY),
+                    (int)Math.Round((rect.Right - screenX - 1) * scaleX),
+                    (int)Math.Round((rect.Bottom - screenY - 1) * scaleY));
                 r.Intersect(new Rectangle(0, 0, bmp.Width, bmp.Height));
                 g.DrawRectangle(penYellow, r);
                 var r2 = Rectangle.FromLTRB(Math.Max(0, r.Left - 1), Math.Max(0, r.Top - 1),
@@ -463,11 +504,11 @@ internal static partial class RDPilotApplication
         
             internal static Rectangle ClampRect(Rectangle r)
             {
-                var (_, _, w, h) = GetPrimaryScreen();
-                int left = Math.Max(0, Math.Min(w - 1, r.Left));
-                int top = Math.Max(0, Math.Min(h - 1, r.Top));
-                int right = Math.Max(left + 1, Math.Min(w, r.Right));
-                int bottom = Math.Max(top + 1, Math.Min(h, r.Bottom));
+                var (x, y, w, h) = GetPrimaryScreen();
+                int left = Math.Max(x, Math.Min(x + w - 1, r.Left));
+                int top = Math.Max(y, Math.Min(y + h - 1, r.Top));
+                int right = Math.Max(left + 1, Math.Min(x + w, r.Right));
+                int bottom = Math.Max(top + 1, Math.Min(y + h, r.Bottom));
                 return Rectangle.FromLTRB(left, top, right, bottom);
             }
     }
