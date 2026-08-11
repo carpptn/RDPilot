@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Loads, validates, normalizes, and displays application configuration.
@@ -17,7 +17,7 @@ internal static partial class RDPilotApplication
                 Console.WriteLine($"Reasoning effort: control={ReasoningEffortDisplay(Model, ReasoningEffort)}; qa={ReasoningEffortDisplay(EffectiveQaModel(), EffectiveQaReasoningEffort())}; verify={ReasoningEffortDisplay(EffectiveVerifyModel(), EffectiveVerifyReasoningEffort())}; adaptive={(AdaptiveReasoningEffort ? "on" : "off")}");
                 Console.WriteLine($"UI mode: {uiMode}; mouse={(MouseEnabled ? "enabled" : "disabled")}; desktop={(MultiMonitorEnabled ? "virtual multi-monitor" : "primary monitor only")}; post-action delay={UiSettleDelayMs} ms; grid={(GridStepPx > 0 ? $"{GridStepPx}px" : "off")}");
                 Console.WriteLine($"Images: send={ScreenshotSendFormat} max-width={ScreenshotMaxWidthDisplay()} focused-overview={FocusedOverviewMaxWidthDisplay()} qa={QaScreenshotMaxWidthDisplay()} verify={VerifyScreenshotMaxWidthDisplay()} quality={ScreenshotJpegQuality}; crop={CropSendFormat} max-width={CropMaxWidthDisplay()} size={FocusCropSize}px; screen-log={ScreenLogFormat} max-width={ScreenLogMaxWidthDisplay()}; focus_uia={(IncludeFocusUia ? "on" : "off")}; focus crop={(IncludeFocusUiaCrop ? "on" : "off")}; debug images={(DebugImages ? "on" : "off")}");
-                Console.WriteLine($"Output: max_tokens={MaxOutputTokens}; qa_max_tokens={QaMaxOutputTokens}; verify_max_tokens={VerifyMaxOutputTokens}; incomplete_retries={IncompleteMaxOutputRetries}/{IncompleteMaxOutputTokenCap}; verbosity={TextVerbosity}; action_text_chars={MaxActionTextChars}; history_chars={HistoryTailChars}; history_lines={HistoryTailLines}; verify={VerifyMode}; verify_early_steps={VerifyEarlySteps}; verify_low_confidence={VerifyLowConfidenceThreshold:0.##}; skip_verify_confidence={SkipVerifyConfidenceThreshold:0.##}; verify-refresh={(RefreshScreenshotBeforeVerify ? "on" : "off")}; long text paste threshold={ClipboardPasteThreshold}; prompt_cache={(UsePromptCache ? PromptCacheKey ?? "on" : "off")}; previous_response_state={(UsePreviousResponseState ? "on" : "off")}; omit_unchanged_screen={(OmitUnchangedScreenImageWithState ? "on" : "off")}");
+                Console.WriteLine($"Output: max_tokens={MaxOutputTokens}; qa_max_tokens={QaMaxOutputTokens}; verify_max_tokens={VerifyMaxOutputTokens}; incomplete_cap_retries={IncompleteMaxOutputRetries}/{IncompleteMaxOutputTokenCap}; verbosity={TextVerbosity}; action_text_chars={MaxActionTextChars}; history_chars={HistoryTailChars}; history_lines={HistoryTailLines}; verify={VerifyMode}; verify_early_steps={VerifyEarlySteps}; verify_low_confidence={VerifyLowConfidenceThreshold:0.##}; skip_verify_confidence={SkipVerifyConfidenceThreshold:0.##}; verify-refresh={(RefreshScreenshotBeforeVerify ? "on" : "off")}; long text paste threshold={ClipboardPasteThreshold}; prompt_cache={(UsePromptCache ? PromptCacheKey ?? "on" : "off")}; previous_response_state={(UsePreviousResponseState ? "on" : "off")}; omit_unchanged_screen={(OmitUnchangedScreenImageWithState ? "on" : "off")}");
                 Console.WriteLine($"Logs: requests={(LogRequests ? (PrettyRequestLogs ? "pretty" : "compact") : "off")}; screens={(LogScreens ? "on" : "state-only")}; retries={OpenAiMaxRetries}; timeout={(OpenAiTimeoutSeconds > 0 ? $"{OpenAiTimeoutSeconds}s" : "infinite")}; batch candidates={(ExecuteMultiActionCandidates ? $"on/{MaxQueuedBatchActions}" : "off")}");
                 Console.WriteLine($"Loop guards: goal_mode={GoalMode}; max_steps={(MaxSteps > 0 ? MaxSteps.ToString() : "unlimited")}; max_wait={(MaxWaitSeconds > 0 ? $"{MaxWaitSeconds}s" : "off")}; stagnation={(MaxStagnationStepsBeforeAbort > 0 ? MaxStagnationStepsBeforeAbort.ToString() : "off")}; repeated_action={(MaxRepeatedActionBeforeAbort > 0 ? MaxRepeatedActionBeforeAbort.ToString() : "off")}; rejected_proposals={(MaxRejectedProposalRepeatsBeforeAbort > 0 ? MaxRejectedProposalRepeatsBeforeAbort.ToString() : "off")}; repeat_cooldown={(ActionRepeatCooldownSteps > 0 ? ActionRepeatCooldownSteps.ToString() : "off")}; proactive_confidence={ProactiveLoopConfidenceThreshold:0.00}; model_failures={(MaxModelFailuresBeforeAbort > 0 ? MaxModelFailuresBeforeAbort.ToString() : "off")}; action_failures={(MaxActionFailuresBeforeAbort > 0 ? MaxActionFailuresBeforeAbort.ToString() : "off")}");
                 Console.WriteLine($"Recovery memory: {(RecoveryMemoryEnabled ? $"on; trigger={RecoveryMemoryTriggerSteps}; validate={RecoveryMemoryValidationSteps}; failure_limit={RecoveryMemoryFailureLimit}; active_max={RecoveryMemoryMaxLessons}; quarantine_max={RecoveryMemoryMaxQuarantinedLessons}; context={RecoveryMemoryReservedLessonsPerContext}/{RecoveryMemorySoftMaxLessonsPerContext}; file_max={RecoveryMemoryMaxFileBytes}B; archive={EffectiveRecoveryMemoryArchivePath()} ({RecoveryMemoryArchiveMaxBytes}B x {RecoveryMemoryArchiveRetainedFiles}); prompt={RecoveryMemoryPromptMaxLessons}; progress_verify={(RecoveryProgressVerificationEnabled ? $"on/{RecoveryProgressConfidenceThreshold:0.00}" : "off")}; telemetry={RecoveryTelemetryMaxBytes}B/{RecoveryTelemetryRetainedFiles}; replay_auto_export={(LoopReplayAutoExportEnabled ? EffectiveLoopReplayCorpusPath() : "off")}; path={EffectiveRecoveryMemoryPath()}" : "off")}");
@@ -1274,6 +1274,25 @@ internal static partial class RDPilotApplication
             ];
             static Dictionary<string, object?>? CodeProfileDefaults;
 
+            static int ReasoningEffortRank(string? effort) =>
+                effort?.Trim().ToLowerInvariant() switch
+                {
+                    "none" => 0,
+                    "minimal" => 1,
+                    "low" => 2,
+                    "medium" => 3,
+                    "high" => 4,
+                    "xhigh" => 5,
+                    "max" => 6,
+                    _ => -1
+                };
+
+            static bool IsAtLeastReasoningEffort(string? effort, string minimum) =>
+                ReasoningEffortRank(effort) >= ReasoningEffortRank(minimum);
+
+            static string? RaiseReasoningEffort(string? current, string minimum) =>
+                IsAtLeastReasoningEffort(current, minimum) ? current : minimum;
+
             internal static void ApplyProfile(string? profile)
             {
                 if (string.IsNullOrWhiteSpace(profile))
@@ -1298,13 +1317,21 @@ internal static partial class RDPilotApplication
 
                     case "fast":
                         RunProfile = "fast";
-                        ReasoningEffort = "low";
-                        if (!QaReasoningEffortExplicit) QaReasoningEffort = "low";
-                        if (!VerifyReasoningEffortExplicit) VerifyReasoningEffort = "low";
+                        if (!ReasoningEffortExplicit)
+                            ReasoningEffort = RaiseReasoningEffort(ReasoningEffort, "low");
+                        if (!QaReasoningEffortExplicit &&
+                            !IsAtLeastReasoningEffort(EffectiveQaReasoningEffort(), "low"))
+                            QaReasoningEffort = "low";
+                        if (!VerifyReasoningEffortExplicit &&
+                            !IsAtLeastReasoningEffort(EffectiveVerifyReasoningEffort(), "low"))
+                            VerifyReasoningEffort = "low";
                         UiSettleDelayMs = Math.Min(UiSettleDelayMs, 300);
-                        MaxOutputTokens = 300;
-                        QaMaxOutputTokens = Math.Min(QaMaxOutputTokens, 300);
-                        VerifyMaxOutputTokens = Math.Min(VerifyMaxOutputTokens, 120);
+                        if (!IsAtLeastReasoningEffort(ReasoningEffort, "low"))
+                            MaxOutputTokens = Math.Min(MaxOutputTokens, 300);
+                        if (!IsAtLeastReasoningEffort(EffectiveQaReasoningEffort(), "low"))
+                            QaMaxOutputTokens = Math.Min(QaMaxOutputTokens, 300);
+                        if (!IsAtLeastReasoningEffort(EffectiveVerifyReasoningEffort(), "low"))
+                            VerifyMaxOutputTokens = Math.Min(VerifyMaxOutputTokens, 120);
                         QaScreenshotMaxWidth = Math.Min(QaScreenshotMaxWidth, 1024);
                         VerifyScreenshotMaxWidth = Math.Min(VerifyScreenshotMaxWidth, 1024);
                         TextVerbosity = "low";
@@ -1344,13 +1371,21 @@ internal static partial class RDPilotApplication
         
                     case "balanced":
                         RunProfile = "balanced";
-                        ReasoningEffort = "low";
-                        if (!QaReasoningEffortExplicit) QaReasoningEffort = "low";
-                        if (!VerifyReasoningEffortExplicit) VerifyReasoningEffort = "low";
+                        if (!ReasoningEffortExplicit)
+                            ReasoningEffort = RaiseReasoningEffort(ReasoningEffort, "low");
+                        if (!QaReasoningEffortExplicit &&
+                            !IsAtLeastReasoningEffort(EffectiveQaReasoningEffort(), "low"))
+                            QaReasoningEffort = "low";
+                        if (!VerifyReasoningEffortExplicit &&
+                            !IsAtLeastReasoningEffort(EffectiveVerifyReasoningEffort(), "low"))
+                            VerifyReasoningEffort = "low";
                         UiSettleDelayMs = Math.Max(UiSettleDelayMs, 500);
-                        MaxOutputTokens = 450;
-                        QaMaxOutputTokens = Math.Max(QaMaxOutputTokens, 450);
-                        VerifyMaxOutputTokens = Math.Max(VerifyMaxOutputTokens, 160);
+                        if (!IsAtLeastReasoningEffort(ReasoningEffort, "low"))
+                            MaxOutputTokens = Math.Max(MaxOutputTokens, 450);
+                        if (!IsAtLeastReasoningEffort(EffectiveQaReasoningEffort(), "low"))
+                            QaMaxOutputTokens = Math.Max(QaMaxOutputTokens, 450);
+                        if (!IsAtLeastReasoningEffort(EffectiveVerifyReasoningEffort(), "low"))
+                            VerifyMaxOutputTokens = Math.Max(VerifyMaxOutputTokens, 160);
                         QaScreenshotMaxWidth = Math.Max(QaScreenshotMaxWidth, 1280);
                         VerifyScreenshotMaxWidth = Math.Max(VerifyScreenshotMaxWidth, 1280);
                         TextVerbosity = "low";
@@ -1390,13 +1425,21 @@ internal static partial class RDPilotApplication
         
                     case "quality":
                         RunProfile = "quality";
-                        ReasoningEffort = "medium";
-                        if (!QaReasoningEffortExplicit) QaReasoningEffort = "low";
-                        if (!VerifyReasoningEffortExplicit) VerifyReasoningEffort = "low";
+                        if (!ReasoningEffortExplicit)
+                            ReasoningEffort = RaiseReasoningEffort(ReasoningEffort, "medium");
+                        if (!QaReasoningEffortExplicit &&
+                            !IsAtLeastReasoningEffort(EffectiveQaReasoningEffort(), "low"))
+                            QaReasoningEffort = "low";
+                        if (!VerifyReasoningEffortExplicit &&
+                            !IsAtLeastReasoningEffort(EffectiveVerifyReasoningEffort(), "low"))
+                            VerifyReasoningEffort = "low";
                         UiSettleDelayMs = Math.Max(UiSettleDelayMs, 1000);
-                        MaxOutputTokens = 800;
-                        QaMaxOutputTokens = Math.Max(QaMaxOutputTokens, 800);
-                        VerifyMaxOutputTokens = Math.Max(VerifyMaxOutputTokens, 240);
+                        if (!IsAtLeastReasoningEffort(ReasoningEffort, "medium"))
+                            MaxOutputTokens = Math.Max(MaxOutputTokens, 800);
+                        if (!IsAtLeastReasoningEffort(EffectiveQaReasoningEffort(), "low"))
+                            QaMaxOutputTokens = Math.Max(QaMaxOutputTokens, 800);
+                        if (!IsAtLeastReasoningEffort(EffectiveVerifyReasoningEffort(), "low"))
+                            VerifyMaxOutputTokens = Math.Max(VerifyMaxOutputTokens, 240);
                         QaScreenshotMaxWidth = 0;
                         VerifyScreenshotMaxWidth = 0;
                         TextVerbosity = "medium";
@@ -1452,6 +1495,11 @@ internal static partial class RDPilotApplication
                 RunProfile = "custom";
                 foreach (var (name, value) in CodeProfileDefaults)
                 {
+                    if (name == nameof(ReasoningEffort) &&
+                        ReasoningEffortExplicit)
+                    {
+                        continue;
+                    }
                     if (name == nameof(QaReasoningEffort) &&
                         QaReasoningEffortExplicit)
                     {
@@ -1472,7 +1520,11 @@ internal static partial class RDPilotApplication
         
             internal static void ApplyReasoningEffort(string? value, string source)
             {
-                ApplyReasoningEffort(value, source, v => ReasoningEffort = v);
+                ApplyReasoningEffort(
+                    value,
+                    source,
+                    v => ReasoningEffort = v,
+                    () => ReasoningEffortExplicit = true);
             }
         
             internal static void ApplyReasoningEffort(string? value, string source, Action<string?> setter, Action? markExplicit = null)

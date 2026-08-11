@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Captures, annotates, encodes, and validates desktop screenshots.

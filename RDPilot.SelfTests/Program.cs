@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Reflection;
 
 typeof(RDPilotApplication)
@@ -38,6 +38,9 @@ var tests = new (string Name, Action Run)[]
     ("sensitive action signatures distinguish different inputs", TestSensitiveActionSignatures),
     ("semantic strategies do not merge different targets", TestSemanticStrategyIdentity),
     ("custom profile restores code defaults", TestCustomProfileReset),
+    ("adaptive effort never lowers max", TestMaxReasoningEffortDoesNotDowngrade),
+    ("profiles preserve stronger configured effort and budgets", TestProfilesPreserveStrongEffort),
+    ("output retries follow the effort fallback ladder", TestOutputRetriesFollowReasoningFallback),
     ("stale weak lessons enter quarantine", TestQuarantine),
     ("retention preserves diverse application contexts", TestContextDiverseRetention),
     ("overflow lessons are durably archived", TestRecoveryArchive),
@@ -897,10 +900,135 @@ static void TestCustomProfileReset()
     RDPilotApplication.ConfigurationService.ApplyProfile("custom");
     var root = typeof(RDPilotApplication);
     Assert(GetStatic<string>(root, "RunProfile") == "custom", "profile name did not reset");
-    Assert(GetStatic<string?>(root, "ReasoningEffort") == "medium", "reasoning did not reset");
+    Assert(GetStatic<string?>(root, "ReasoningEffort") == "max", "reasoning did not reset to the max code default");
+    Assert(GetStatic<string?>(root, "VerifyReasoningEffort") == "max", "verifier reasoning did not reset to the max code default");
     Assert(GetStatic<int>(root, "MaxStagnationStepsBeforeAbort") == 20, "stagnation default did not reset");
     Assert(GetStatic<int>(root, "RecoveryMemoryMaxLessons") == 500, "recovery-memory active default changed");
     Assert(GetStatic<int>(root, "RecoveryMemoryMaxQuarantinedLessons") == 500, "recovery-memory quarantine default changed");
+}
+
+static void TestMaxReasoningEffortDoesNotDowngrade()
+{
+    var root = typeof(RDPilotApplication);
+    var effortField = root.GetField("ReasoningEffort", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var adaptiveField = root.GetField("AdaptiveReasoningEffort", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var originalEffort = effortField.GetValue(null);
+    var originalAdaptive = adaptiveField.GetValue(null);
+    try
+    {
+        effortField.SetValue(null, "max");
+        adaptiveField.SetValue(null, true);
+        var effective = (string?)InvokePrivate(
+            typeof(RDPilotApplication.ControlLoopService),
+            "EffectiveReasoningEffort",
+            8,
+            4,
+            4);
+        Assert(effective == "max", "adaptive effort downgraded max after stagnation");
+    }
+    finally
+    {
+        effortField.SetValue(null, originalEffort);
+        adaptiveField.SetValue(null, originalAdaptive);
+    }
+}
+
+static void TestProfilesPreserveStrongEffort()
+{
+    var root = typeof(RDPilotApplication);
+    var effortField = root.GetField("ReasoningEffort", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var explicitField = root.GetField("ReasoningEffortExplicit", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var originalEffort = effortField.GetValue(null);
+    var originalExplicit = explicitField.GetValue(null);
+    try
+    {
+        explicitField.SetValue(null, false);
+        RDPilotApplication.ConfigurationService.ApplyProfile("custom");
+        RDPilotApplication.ConfigurationService.ApplyProfile("fast");
+        Assert(GetStatic<string?>(root, "ReasoningEffort") == "max", "fast profile lowered max reasoning effort");
+        Assert(GetStatic<int>(root, "MaxOutputTokens") >= 4000, "fast profile lowered the max reasoning budget");
+        Assert((string?)InvokePrivate(typeof(RDPilotApplication.ConfigurationService), "EffectiveQaReasoningEffort") == "max", "fast profile lowered QA reasoning effort");
+        Assert(GetStatic<int>(root, "QaMaxOutputTokens") >= 2500, "fast profile lowered the QA reasoning budget");
+        Assert((string?)InvokePrivate(typeof(RDPilotApplication.ConfigurationService), "EffectiveVerifyReasoningEffort") == "max", "fast profile lowered verifier reasoning effort");
+        Assert(GetStatic<int>(root, "VerifyMaxOutputTokens") >= 1500, "fast profile lowered the verifier reasoning budget");
+
+        explicitField.SetValue(null, true);
+        effortField.SetValue(null, "low");
+        RDPilotApplication.ConfigurationService.ApplyProfile("quality");
+        Assert(GetStatic<string?>(root, "ReasoningEffort") == "low", "explicit low effort was overwritten by a profile");
+    }
+    finally
+    {
+        effortField.SetValue(null, originalEffort);
+        explicitField.SetValue(null, originalExplicit);
+        RDPilotApplication.ConfigurationService.ApplyProfile("custom");
+    }
+}
+
+static void TestOutputRetriesFollowReasoningFallback()
+{
+    foreach (var effort in new[] { "low", "medium", "high", "xhigh", "max" })
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = "gpt-5.6-luna",
+            ["max_output_tokens"] = 4000,
+            ["reasoning"] = new Dictionary<string, object?> { ["effort"] = effort }
+        };
+        var retryBody = (System.Text.Json.Nodes.JsonObject)RDPilotApplication.OpenAiResponsesService.BuildMaxOutputRetryBody(
+            body,
+            out var retryMaxTokens,
+            out var retryEffort);
+        var retryReasoning = (System.Text.Json.Nodes.JsonObject)retryBody["reasoning"]!;
+
+        Assert(retryEffort == effort, $"retry changed reasoning effort from {effort} to {retryEffort}");
+        Assert(retryReasoning["effort"]?.GetValue<string>() == effort, $"retry body changed reasoning effort from {effort}");
+        Assert(retryMaxTokens > 4000, "retry did not increase the output budget");
+    }
+
+    object ladderBody = new Dictionary<string, object?>
+    {
+        ["model"] = "gpt-5.6-luna",
+        ["max_output_tokens"] = 4000,
+        ["reasoning"] = new Dictionary<string, object?> { ["effort"] = "max" }
+    };
+    var expectedEfforts = new[] { "max", "xhigh", "high", "medium", "low" };
+    var firstRetry = RDPilotApplication.OpenAiResponsesService.TryBuildMaxOutputRetryBody(
+        ladderBody,
+        out var firstRetryBody,
+        out var firstRetryMaxTokens,
+        out var firstRetryEffort,
+        out _);
+    Assert(firstRetry, "retry did not expand the output budget before lowering effort");
+    Assert(firstRetryMaxTokens == 8000, "first retry did not reach the configured token cap");
+    Assert(firstRetryEffort == expectedEfforts[0], "first retry lowered effort before exhausting the token cap");
+    ladderBody = firstRetryBody;
+
+    for (var index = 1; index < expectedEfforts.Length; index++)
+    {
+        var canRetry = RDPilotApplication.OpenAiResponsesService.TryBuildMaxOutputRetryBody(
+            ladderBody,
+            out var nextBody,
+            out var nextMaxTokens,
+            out var nextEffort,
+            out _);
+        Assert(canRetry, $"retry stopped before reaching {expectedEfforts[index]}");
+        Assert(nextMaxTokens == 8000, $"retry changed the cap unexpectedly at {expectedEfforts[index]}");
+        Assert(nextEffort == expectedEfforts[index], $"retry did not step down to {expectedEfforts[index]}");
+        var nextReasoning = (System.Text.Json.Nodes.JsonObject)((System.Text.Json.Nodes.JsonObject)nextBody)["reasoning"]!;
+        Assert(nextReasoning["effort"]?.GetValue<string>() == expectedEfforts[index], $"retry body did not contain {expectedEfforts[index]}");
+        ladderBody = nextBody;
+    }
+
+    var exhausted = RDPilotApplication.OpenAiResponsesService.TryBuildMaxOutputRetryBody(
+        ladderBody,
+        out _,
+        out var exhaustedMaxTokens,
+        out var exhaustedEffort,
+        out _);
+    Assert(!exhausted, "retry continued below the low effort floor");
+    Assert(exhaustedMaxTokens == 8000, "exhausted retry changed the final token cap");
+    Assert(exhaustedEffort == "low", "exhausted retry lost the low effort marker");
 }
 
 static void TestQuarantine()

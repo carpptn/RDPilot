@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Controls the console window and the emergency cancellation hotkey.

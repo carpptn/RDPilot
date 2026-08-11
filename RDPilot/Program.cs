@@ -1,15 +1,16 @@
-/// <summary>
+﻿/// <summary>
 /// Coordinates the interactive desktop-agent application and its shared runtime state.
 /// </summary>
 internal static partial class RDPilotApplication
 {
     // === CONFIG ===
-    const string DefaultModel = "gpt-5.6-terra";                // e.g., gpt-4o-mini, gpt-4o, gpt-5
+    const string DefaultModel = "gpt-5.6-luna";                 // e.g., gpt-4o-mini, gpt-4o, gpt-5
     static string Model = DefaultModel;
-    static string? ReasoningEffort = "medium";               // null = API/model default; e.g., low, medium, high, xhigh
+    static string? ReasoningEffort = "max";                  // null = API/model default; e.g., low, medium, high, xhigh, max
+    static bool ReasoningEffortExplicit = false;
     static string? QaReasoningEffort = null;
     static bool QaReasoningEffortExplicit = false;
-    static string? VerifyReasoningEffort = "medium";
+    static string? VerifyReasoningEffort = "max";
     static bool VerifyReasoningEffortExplicit = true;
     static string? QaModel = null;
     static string? VerifyModel = null;
@@ -19,7 +20,7 @@ internal static partial class RDPilotApplication
     static int MaxSteps = MaxStepsDefault;
     static bool MultiMonitorEnabled = false;
 
-    // Mouse: enable/disable (default enabled for GPT-5.6-terra vision/control quality)
+    // Mouse: enable/disable (default enabled for GPT-5.6 vision/control quality)
     static bool MouseEnabled = true;
 
     // Global, configurable time to let UI "settle" after an action before taking the next screenshot
@@ -55,11 +56,11 @@ internal static partial class RDPilotApplication
 
     // Speed/quality profile
     static string RunProfile = "custom";                // custom | fast | balanced | quality
-    static int MaxOutputTokens = 600;
-    static int QaMaxOutputTokens = 600;
-    static int VerifyMaxOutputTokens = 120;
+    static int MaxOutputTokens = 4000;
+    static int QaMaxOutputTokens = 2500;
+    static int VerifyMaxOutputTokens = 1500;
     static int IncompleteMaxOutputRetries = 2;
-    static int IncompleteMaxOutputTokenCap = 6000;
+    static int IncompleteMaxOutputTokenCap = 8000;
     static int MaxActionTextChars = 3000;
     static int QaScreenshotMaxWidth = 1024;
     static int VerifyScreenshotMaxWidth = 1024;
@@ -201,7 +202,7 @@ internal static partial class RDPilotApplication
     static string? LastOpenAiResponseId = null;
     static readonly HashSet<string> AllowedReasoningEfforts = new(StringComparer.OrdinalIgnoreCase)
     {
-        "none", "minimal", "low", "medium", "high", "xhigh"
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
     };
     static readonly HashSet<string> KnownActionTypes = new(StringComparer.OrdinalIgnoreCase)
     {

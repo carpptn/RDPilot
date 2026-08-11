@@ -116,12 +116,12 @@ Logs are stored in the following folders:
 | ------------------------- | ------------------------------------------------- | -------------------------------- | ----- |
 | OpenAI API key            | `OPENAI_API_KEY`                                  | —                                | **Required** |
 | Runtime profile           | `RDPILOT_PROFILE=custom/fast/balanced/quality`, `FAST_MODE=1`, `QUALITY_MODE=1` | `--profile <name>`, `--fast` / `--balanced` / `--quality` | Default `custom`, which preserves code defaults; `RDPILOT_PROFILE` overrides mode aliases |
-| Model                     | `OPENAI_MODEL=gpt-5.6-terra`                      | `--model <model>`                | Default `gpt-5.6-terra` |
+| Model                     | `OPENAI_MODEL=gpt-5.6-luna`                       | `--model <model>`                | Default `gpt-5.6-luna` |
 | Q&A model                 | `OPENAI_QA_MODEL=<model>`                         | `--qa-model <model>`             | Falls back to `--model` |
 | Verify model              | `OPENAI_VERIFY_MODEL=<model>`                     | `--verify-model <model>`         | Falls back to `--model` |
-| Reasoning effort          | `OPENAI_REASONING_EFFORT=low/medium/high/...`    | `--effort <effort>`              | Use `default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`; sent only for reasoning models |
+| Reasoning effort          | `OPENAI_REASONING_EFFORT=low/medium/high/...`    | `--effort <effort>`              | Default `max`; use `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; sent only for reasoning models |
 | Q&A reasoning effort      | `OPENAI_QA_REASONING_EFFORT=low/medium/high/...` | `--qa-effort <effort>`           | Default `low`; `default` means API/model default |
-| Verify reasoning effort   | `OPENAI_VERIFY_REASONING_EFFORT=low/medium/high/...` | `--verify-effort <effort>`   | Default `low`; `default` means API/model default |
+| Verify reasoning effort   | `OPENAI_VERIFY_REASONING_EFFORT=low/medium/high/...` | `--verify-effort <effort>`   | Default `max`; `default` means API/model default |
 | Mouse actions             | `MOUSE_ENABLED=1/true/yes` or `0/false/no`        | `--mouse` / `--no-mouse`         | Default **on** |
 | Multi-monitor desktop     | `MULTI_MONITOR=1/0`                               | `--multi-monitor` / `--primary-monitor-only` | Default off; opt-in captures and controls the full Windows virtual desktop, including monitors with negative coordinates |
 | Post-action UI delay (ms) | `POST_ACTION_DELAY_MS=###`                        | `--delay <ms>`                   | Default `300` in fast mode |
@@ -129,10 +129,10 @@ Logs are stored in the following folders:
 | Max control steps         | `MAX_STEPS=###`                                   | `--max-steps <n>`                | Default `10000`; `0` removes the step limit for genuinely open-ended goals |
 | Goal mode                 | `GOAL_MODE=auto/finite/continuous`                | `--goal-mode <mode>`             | Default `auto`; explicitly overrides heuristic classification when a goal is ambiguous |
 | Max wait duration         | `MAX_WAIT_SECONDS=###`                            | `--max-wait <seconds>`           | Default `30` in fast mode; `0` disables capping |
-| Output token cap          | `MAX_OUTPUT_TOKENS=###`                           | `--max-output-tokens <n>`        | Default `300` in fast mode |
-| Q&A output token cap      | `QA_MAX_OUTPUT_TOKENS=###`                        | `--qa-max-output-tokens <n>`     | Default `300` in fast mode |
-| Verify output token cap   | `VERIFY_MAX_OUTPUT_TOKENS=###`                    | `--verify-max-output-tokens <n>` | Default `120` in fast mode |
-| Incomplete output retry   | `INCOMPLETE_MAX_OUTPUT_RETRIES`, `INCOMPLETE_MAX_OUTPUT_TOKEN_CAP` | `--incomplete-max-output-retries <n>`, `--incomplete-max-output-token-cap <n>` | Retries `status=incomplete` / `max_output_tokens` with a larger cap and lower reasoning effort |
+| Output token cap          | `MAX_OUTPUT_TOKENS=###`                           | `--max-output-tokens <n>`        | Default `4000`; profiles do not lower a stronger configured budget |
+| Q&A output token cap      | `QA_MAX_OUTPUT_TOKENS=###`                        | `--qa-max-output-tokens <n>`     | Default `2500`; profiles do not lower a stronger configured budget |
+| Verify output token cap   | `VERIFY_MAX_OUTPUT_TOKENS=###`                    | `--verify-max-output-tokens <n>` | Default `1500`; profiles do not lower a stronger configured budget |
+| Incomplete output retry   | `INCOMPLETE_MAX_OUTPUT_RETRIES`, `INCOMPLETE_MAX_OUTPUT_TOKEN_CAP` | `--incomplete-max-output-retries <n>`, `--incomplete-max-output-token-cap <n>` | On `status=incomplete` / `max_output_tokens`, expands the cap first, then lowers effort one step at a time through `max → xhigh → high → medium → low`; `n` controls same-effort cap expansions (minimum one), never the final fallback to `low` |
 | Max action text length    | `MAX_ACTION_TEXT_CHARS=###`                       | `--max-action-text-chars <n>`    | Default `3000`; long `paste_text` / `type_text` content should be split across actions |
 | Q&A screenshot width      | `QA_SCREENSHOT_MAX_WIDTH=###`                     | `--qa-screenshot-max-width <px>` | Default `1024` in fast mode; `0` uses normal send image |
 | Verify screenshot width   | `VERIFY_SCREENSHOT_MAX_WIDTH=###`                 | `--verify-screenshot-max-width <px>` | Default `1024` in fast mode; `0` uses normal send image |
@@ -223,7 +223,8 @@ Example:
 ```json
 {
   "profile": "fast",
-  "model": "gpt-5.6-terra",
+  "model": "gpt-5.6-luna",
+  "reasoningEffort": "max",
   "qaModel": "gpt-5-mini",
   "verifyModel": "gpt-5-mini",
   "qaReasoningEffort": "low",
@@ -316,13 +317,13 @@ Example:
 ## Profiles
 
 * `custom` (default): preserves the values initialized in code unless config, environment variables, or CLI flags override them.
-* `fast`: `effort=low`, JPEG screenshots downscaled to 1280px, 640px full-screen overview when a focus crop is sent, JPEG crops up to 768px, JPEG screen logs up to 1280px, short output, short step history, adaptive verify, no debug overlays.
+* `fast`: requests at least `effort=low` without lowering a stronger configured effort, JPEG screenshots downscaled to 1280px, 640px full-screen overview when a focus crop is sent, JPEG crops up to 768px, JPEG screen logs up to 1280px, short output, short step history, adaptive verify, no debug overlays.
 * `balanced`: JPEG screenshots up to 1600px, JPEG crops up to 1024px, JPEG screen logs up to 1600px, focus UIA crop enabled, short output, medium step history.
-* `quality`: original PNG screenshots and crops, original PNG screen logs, focus UIA crop, debug overlays, longer step history, verifier always on, `effort=medium`.
+* `quality`: requests at least `effort=medium` without lowering a stronger configured effort, original PNG screenshots and crops, original PNG screen logs, focus UIA crop, debug overlays, longer step history, verifier always on.
 
-The control loop can temporarily raise reasoning effort to `medium`/`high` when it detects stagnation or repeated ineffective actions.
-Use `--no-adaptive-effort` to keep `gpt-5.6-terra` on the configured effort for latency-sensitive runs.
-Q&A and verifier calls can use separate effort settings, so the main control loop can spend more reasoning only when needed while cheaper helper calls stay on `low`. For helper calls, `default` is explicit: it omits `reasoning.effort` instead of falling back to the control-loop effort.
+The control loop can temporarily raise reasoning effort to `medium`/`high` when it detects stagnation or repeated ineffective actions, but never lowers a configured effort such as `max`.
+Use `--no-adaptive-effort` to keep `gpt-5.6-luna` on the configured effort for latency-sensitive runs.
+Q&A and verifier calls can use separate effort settings, so helper calls can use a deliberately lower effort when explicitly configured. Profiles do not lower a stronger configured helper effort. For helper calls, `default` is explicit: it omits `reasoning.effort` instead of falling back to the control-loop effort.
 Verifier calls use a smaller output-token cap by default because they return only `yes`/`no` plus a short reason.
 Q&A and verifier calls can use their own smaller screenshot width, keeping helper calls cheaper than the main control loop.
 Verifier prompts keep `SCREEN_SIZE` aligned with the actual helper image after downscaling.
@@ -424,10 +425,10 @@ If a long `wait` action leaves the screen visually unchanged, RDPilot waits a sh
 Screenshot sanity checks warn when the captured screen is nearly black, nearly uniform, unexpectedly small, or when the RDPilot console itself is the foreground window and may be covering the target app.
 Active-window and focused-UIA metadata are scanned for modal, permission, and UAC hints; when detected, the next prompt tells the model to resolve the visible dialog explicitly.
 By default RDPilot minimizes its own console before control-loop screenshots and actions, then restores it when the run finishes. This prevents the console from becoming the UI target or covering the app being controlled.
-Ctrl+Alt+Q cancels in-flight OpenAI HTTP calls and retry backoff, so aborting a slow `gpt-5.6-terra` response no longer waits for the request timeout.
+Ctrl+Alt+Q cancels in-flight OpenAI HTTP calls and retry backoff, so aborting a slow `gpt-5.6-luna` response no longer waits for the request timeout.
 The same abort token cancels long `wait`, verifier settle delay, batched waits, and post-action delays.
 After retryable OpenAI failures such as 5xx, timeout, or transport errors, the control loop keeps the goal alive for a small number of attempts instead of aborting after the first failed call. Non-retryable errors and parse errors still stop the goal.
-If a response completes as `status=incomplete` because `max_output_tokens` was spent before valid JSON was emitted, RDPilot retries with a larger output cap and `reasoning.effort=low`.
+If a response completes as `status=incomplete` because `max_output_tokens` was spent before valid JSON was emitted, RDPilot first retries with a larger output cap at the same effort. Once the configured cap is reached (or the configured same-effort retry allowance is used), it lowers effort one step at a time through `max → xhigh → high → medium → low`. It returns an error only when no larger cap or lower effort remains; other errors do not trigger this fallback.
 Very long `paste_text` and `type_text` payloads are capped by schema so the model splits large content across multiple real-UI paste actions instead of emitting an oversized JSON response that can be truncated.
 If `paste_text` or `type_text` produces no visible screen change, the next prompts include `TEXT_INPUT_HINT`, telling the model to fix focus/editability or choose another visible UI route before repeating text input.
 After repeated no-change text-input attempts, RDPilot temporarily blocks further `paste_text`, `type_text`, and paste shortcuts so the model must establish focus/editability or choose another visible UI path first.
@@ -455,7 +456,7 @@ Use `--loop-replay-import <reviewed-corpus.json>` to merge independently reviewe
 open Edge browser, go to Google.com, and search for the term 'life'
 ```
 
-### Faster `gpt-5.6-terra` run
+### Faster `gpt-5.6-luna` run
 
 ```
 dotnet run --project RDPilot -- --effort low "open Edge browser, go to Google.com, and search for the term 'life'"

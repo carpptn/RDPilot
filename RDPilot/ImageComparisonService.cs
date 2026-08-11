@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Builds reduced image fingerprints and compares screen changes.

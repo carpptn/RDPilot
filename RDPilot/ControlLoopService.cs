@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Runs the goal-driven desktop control loop and its safety guards.
@@ -1600,7 +1600,7 @@ internal static partial class RDPilotApplication
                     return ReasoningEffort;
         
                 var current = ReasoningEffort.ToLowerInvariant();
-                if (current is "high" or "xhigh")
+                if (current is "high" or "xhigh" or "max")
                     return ReasoningEffort;
         
                 if (stagnationSteps >= 4 ||

@@ -1,4 +1,4 @@
-/// <summary>
+﻿/// <summary>
 /// Applies a consistent color palette to console output while keeping redirected and file logs plain.
 /// </summary>
 internal static class ConsoleTheme

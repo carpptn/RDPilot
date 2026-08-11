@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Maps image coordinates and executes constrained mouse, keyboard, clipboard, and local actions.

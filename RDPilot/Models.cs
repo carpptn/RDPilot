@@ -1,4 +1,4 @@
-/// <summary>
+﻿/// <summary>
 /// Converts coordinates and rectangles between a captured image and the physical screen.
 /// </summary>
 internal readonly record struct ScreenCoordinateMapper(

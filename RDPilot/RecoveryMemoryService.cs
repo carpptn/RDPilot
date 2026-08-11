@@ -1,4 +1,4 @@
-internal static partial class RDPilotApplication
+﻿internal static partial class RDPilotApplication
 {
     /// <summary>
     /// Learns coordinate-independent recovery strategies from successfully escaped UI stalls.
