@@ -48,22 +48,20 @@
                 }
         
                 using var doc = JsonDocument.Parse(raw);
-                if (!TryParseResponsePayload<ActionDto>(doc.RootElement, out var first, out var candidateCount, out var candidates))
+                if (!TryParseControlActionSequence(
+                        doc.RootElement,
+                        out var candidates,
+                        out var payloadCount,
+                        out var legacyPayload))
                 {
-                    Console.WriteLine("Replay: no parsable ActionDto candidates.");
+                    Console.WriteLine("Replay: no valid control-action sequence.");
                     return;
                 }
-                candidates = [.. candidates.Where(IsKnownAction)];
-                if (candidates.Count == 0)
-                {
-                    Console.WriteLine("Replay: no valid ActionDto candidates.");
-                    return;
-                }
-                first = candidates[0];
+                var first = candidates[0];
         
                 Console.WriteLine($"Replay response: {path}");
-                Console.WriteLine($"Candidates: {candidateCount}; valid_actions={candidates.Count}");
-                Console.WriteLine($"First: {Describe(first!)}");
+                Console.WriteLine($"Payloads: {payloadCount}; legacy={legacyPayload}; proposed_actions={candidates.Count}");
+                Console.WriteLine($"First: {Describe(first)}");
         
                 var queued = SafeBatchFollowUps(candidates);
                 Console.WriteLine($"Safe batch follow-ups: {queued.Length}");
@@ -483,8 +481,8 @@
         
             internal static int CountParsedActionCandidates(JsonElement root)
             {
-                return TryParseResponsePayload<ActionDto>(root, out _, out _, out var candidates)
-                    ? candidates.Count(IsKnownAction)
+                return TryParseControlActionSequence(root, out var actions, out _, out _)
+                    ? actions.Count
                     : CountOutputTextItems(root);
             }
         

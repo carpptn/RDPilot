@@ -14,7 +14,7 @@
                 var screensDir = EnsureScreensDir();
                 var requestsDir = EnsureRequestsDir();
                 var logDir = EnsureLogDir();
-        
+
                 var prevOut = Console.Out;
                 var prevErr = Console.Error;
                 var logPath = Path.Combine(logDir, $"{commandId}.log");
@@ -24,6 +24,7 @@
                 Console.SetError(tee);
         
                 CancellationTokenSource? cancelCts = null;
+                ControlContextChain? controlContextChain = null;
                 var consoleHidden = false;
                 var currentStep = 0;
                 var runResult = new ControlRunResult(
@@ -40,6 +41,10 @@
                     Console.WriteLine($"Goal: {goal}");
                     var goalMode = ResolveGoalMode(goal, GoalMode);
                     var recurringWorkflowIntent =
+                        string.Equals(
+                            goalMode,
+                            "continuous",
+                            StringComparison.Ordinal) &&
                         HasRecurringWorkflowIntent(goal);
                     Console.WriteLine($"Goal mode: {goalMode}");
                     if (recurringWorkflowIntent)
@@ -59,26 +64,51 @@
                             "completed through the local fast path");
                     }
         
+                    controlContextChain = new ControlContextChain(
+                        commandId,
+                        UsePreviousResponseState,
+                        ControlContextCompactionEnabled,
+                        ControlContextFallbackLimit);
+                    controlContextChain.LogStart(Model);
                     var systemRules = BuildSystemRules(); // stable per run; dynamic action availability is enforced by schema
                     var historyBuffer = new StringBuilder();
                     var recoveryLessons = LoadRecoveryLessons();
                     var recentExecutedActions = new Queue<ResolvedActionSnapshot>();
                     var loopStateGraph = new LoopStateGraph { RunId = commandId };
+                    var observationSession = new AdaptiveObservationSession();
+                    var observationActionGuard = new ObservationActionGuardState();
+                    var shortTermPlan = new ShortTermPlanTracker();
+                    var turnBasedTransitions = new TurnBasedTransitionTracker(shortTermPlan);
+                    observationSession.LogInitialProfile();
                     RecoveryEpisodeState? recoveryEpisode = null;
                     cancelCts = StartCancelHotkeyListener();
         
                     Rectangle? nextFocusRect = null; // crop/overlay after 'aim'/'point'/'request_crop'
                     Rectangle? lastAimRect = null;   // active AIM – required before clicks
+                    Rectangle? turnBasedInteractionRect = null;
+                    var turnBasedInteractionRegionIsAutomatic = false;
+                    var turnBasedAutomaticRegionRefined = false;
+                    var turnBasedInteractionWindow = IntPtr.Zero;
+                    string? turnBasedInteractionContext = null;
+                    string? previousTurnFocusDataUrl = null;
+                    string? previousTurnFocusPath = null;
+                    string? turnReferenceFocusDataUrl = null;
+                    string? turnReferenceFocusPath = null;
+                    IReadOnlyList<TurnChangeImagePair> activeTurnChangeImages = [];
         
                     // change / strategy metrics
                     byte[]? prevShotFingerprint = null;
                     byte[]? prevActiveWindowFingerprint = null;
+                    ScreenObservationFrame? prevObservationFrame = null;
+                    UiPromptContext? prevObservationContext = null;
+                    ObservationAssessment? lastObservation = null;
                     ResolvedActionSnapshot? prevAction = null;
                     string? lastSig = null;
                     var recentIneffectiveSpatialActions = new List<ResolvedActionSnapshot>();
                     int stagnationSteps = 0;
                     int repeatCount = 0;
                     int continuousIdleSteps = 0;
+                    int ambiguousObservationSteps = 0;
                     double lastDelta = double.NaN;
                     double lastGlobalDelta = double.NaN;
                     double lastActiveWindowDelta = double.NaN;
@@ -92,7 +122,6 @@
                     int textInputCooldownUntilStep = 0;
                     int consecutiveModelFailures = 0;
                     int consecutiveActionFailures = 0;
-                    string? previousControlResponseId = null;
                     var actionCooldownUntilStep = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     var spatialActionCooldowns = new List<SpatialActionCooldown>();
                     var recentRejectedActions = new Queue<ResolvedActionSnapshot>();
@@ -144,6 +173,32 @@
                         planningLoopDetected = false;
                         previousRejectedAction = null;
                     }
+
+                    void BeginExternalStateEpoch()
+                    {
+                        loopStateGraph = new LoopStateGraph { RunId = commandId };
+                        recoveryEpisode = null;
+                        recentExecutedActions.Clear();
+                        recentIneffectiveSpatialActions.Clear();
+                        ClearRejectedProposalLoop();
+                        stagnationSteps = 0;
+                        repeatCount = 0;
+                        continuousIdleSteps = 0;
+                        ambiguousObservationSteps = 0;
+                        consecutiveActionFailures = 0;
+                        lastSig = null;
+                        lastObservation = null;
+                        lastDelta = double.NaN;
+                        lastGlobalDelta = double.NaN;
+                        lastActiveWindowDelta = double.NaN;
+                        actionCooldownUntilStep.Clear();
+                        spatialActionCooldowns.Clear();
+                        textInputNoChangeAttempts = 0;
+                        textInputCooldownUntilStep = 0;
+                        turnBasedTransitions.BeginExternalStateEpoch();
+                        Console.WriteLine(
+                            "[loop] external state boundary started a fresh loop-detection epoch; prior recovery evidence and unverified hypotheses were cleared.");
+                    }
         
                     for (int step = 1;
                          MaxSteps == 0 || step <= MaxSteps;
@@ -160,10 +215,39 @@
                             break;
                         }
                         var expectedContinuousIdle = false;
+
+                        if (turnBasedInteractionWindow != IntPtr.Zero &&
+                            string.Equals(
+                                observationSession.EffectiveProfile,
+                                "turn_based_interaction",
+                                StringComparison.Ordinal) &&
+                            GetForegroundWindow() != turnBasedInteractionWindow &&
+                            TryRestoreForegroundWindow(turnBasedInteractionWindow))
+                        {
+                            Console.WriteLine("[turn-focus] restored the remembered interaction window before observation.");
+                        }
         
                         // screenshot at the beginning of a step (state after previous action)
-                        var (dataUrl, savedPath, screenW, screenH, imageW, imageH, focusUrl, appliedFocusRect, focusUiaRect, focusUiaSummary, focusUiaDataUrl, focusUiaPath, shotFingerprint, activeWindowFingerprint) =
-                            ScreenshotToDataUrl(screensDir, commandId, step, nextFocusRect);
+                        var persistentTurnBasedRect = string.Equals(
+                                observationSession.EffectiveProfile,
+                                "turn_based_interaction",
+                                StringComparison.Ordinal)
+                            ? turnBasedInteractionRegionIsAutomatic
+                                ? null
+                                : turnBasedInteractionRect
+                            : null;
+                        var requestedFocusRect = nextFocusRect ?? persistentTurnBasedRect;
+                        var includeObservationDetail =
+                            prevAction?.ObservationRegion is not null ||
+                            prevAction?.Action.Type is "drag_drop" or "drag_path" or "type_text" or "paste_text" ||
+                            persistentTurnBasedRect is not null;
+                        var (dataUrl, savedPath, screenW, screenH, imageW, imageH, focusUrl, appliedFocusRect, focusUiaRect, focusUiaSummary, focusUiaDataUrl, focusUiaPath, shotFingerprint, activeWindowFingerprint, observationFrame) =
+                            ScreenshotToDataUrl(
+                                screensDir,
+                                commandId,
+                                step,
+                                requestedFocusRect,
+                                includeObservationDetail);
                         SetCurrentScreenMap(screenW, screenH, imageW, imageH);
                         Console.WriteLine($"[shot] {ShotLabel(savedPath, commandId, step)}");
                         if (CurrentScreenMap.RequiresMapping)
@@ -181,18 +265,180 @@
                         }
                         if (focusUiaRect is Rectangle fr)
                             Console.WriteLine($"[focus_uia] bbox=({fr.Left},{fr.Top})–({fr.Right},{fr.Bottom})");
+
+                        var promptContext = CaptureUiPromptContext(
+                            focusUiaSummary,
+                            screenW,
+                            screenH);
+                        observationSession.PrepareForPrompt(promptContext, goal);
+                        var currentTurnBasedContext = TurnBasedContextKey(promptContext);
+                        if (turnBasedInteractionRect is not null &&
+                            !string.Equals(
+                                turnBasedInteractionContext,
+                                currentTurnBasedContext,
+                                StringComparison.Ordinal))
+                        {
+                            Console.WriteLine("[turn] cleared persistent interaction region because the foreground context changed.");
+                            turnBasedInteractionRect = null;
+                            turnBasedInteractionRegionIsAutomatic = false;
+                            turnBasedAutomaticRegionRefined = false;
+                            turnBasedInteractionWindow = IntPtr.Zero;
+                            turnBasedInteractionContext = null;
+                            previousTurnFocusDataUrl = null;
+                            previousTurnFocusPath = null;
+                            turnReferenceFocusDataUrl = null;
+                            turnReferenceFocusPath = null;
+                            activeTurnChangeImages = [];
+                            turnBasedTransitions.Reset();
+                        }
+
+                        if (turnBasedInteractionRect is null &&
+                            string.Equals(
+                                observationSession.EffectiveProfile,
+                                "turn_based_interaction",
+                                StringComparison.Ordinal) &&
+                            ResolveTurnBasedObservationRegion(
+                                null,
+                                "turn_based_interaction") is Rectangle automaticTurnRegion)
+                        {
+                            turnBasedInteractionRect = automaticTurnRegion;
+                            turnBasedInteractionRegionIsAutomatic = true;
+                            turnBasedAutomaticRegionRefined = false;
+                            turnBasedInteractionWindow = GetForegroundWindow();
+                            turnBasedInteractionContext = currentTurnBasedContext;
+                            var turnStateFrame = observationFrame.DetailWidth > 0
+                                ? observationFrame
+                                : CaptureObservationFrameProbe(includeDetail: true);
+                            turnBasedTransitions.Reset();
+                            turnBasedTransitions.ObserveState(
+                                turnStateFrame,
+                                automaticTurnRegion);
+                            Console.WriteLine(
+                                $"[turn] automatic interaction region established at ({automaticTurnRegion.Left},{automaticTurnRegion.Top})–({automaticTurnRegion.Right},{automaticTurnRegion.Bottom}); aggressive batching is available from the first planned route.");
+                        }
         
                         // — Visual delta vs previous screenshot (effect of last action)
-                        if (prevShotFingerprint != null)
+                        if (prevShotFingerprint != null && prevObservationFrame != null)
                         {
-                            lastGlobalDelta = ComputeImageDelta(prevShotFingerprint, shotFingerprint);
-                            lastActiveWindowDelta = prevActiveWindowFingerprint is not null
-                                ? ComputeImageDelta(prevActiveWindowFingerprint, activeWindowFingerprint)
-                                : lastGlobalDelta;
-                            // Prefer the foreground application. This prevents
-                            // background animations from looking like task progress.
-                            lastDelta = 0.80 * lastActiveWindowDelta + 0.20 * lastGlobalDelta;
-                            bool noChange = lastDelta < NoChangeThreshold;
+                            lastObservation = observationSession.Assess(
+                                prevObservationFrame,
+                                observationFrame,
+                                prevAction,
+                                prevObservationContext,
+                                promptContext,
+                                goalMode,
+                                goal);
+                            if (turnBasedInteractionRect is Rectangle turnRegion &&
+                                string.Equals(
+                                    lastObservation.ActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal))
+                            {
+                                if (turnBasedInteractionRegionIsAutomatic &&
+                                    !turnBasedAutomaticRegionRefined &&
+                                    prevAction is not null &&
+                                    IsStateChangingInteractionAction(prevAction.Action) &&
+                                    lastObservation.VisualChange == VisualChangeState.Changed &&
+                                    InferTurnBasedObservationRegion(
+                                        prevObservationFrame,
+                                        observationFrame,
+                                        turnRegion) is Rectangle refinedTurnRegion)
+                                {
+                                    turnBasedInteractionRect = refinedTurnRegion;
+                                    turnBasedAutomaticRegionRefined = true;
+                                    turnRegion = refinedTurnRegion;
+                                    previousTurnFocusDataUrl = null;
+                                    previousTurnFocusPath = null;
+                                    turnReferenceFocusDataUrl = null;
+                                    turnReferenceFocusPath = null;
+                                    activeTurnChangeImages = [];
+                                    turnBasedTransitions.Reset();
+                                    turnBasedTransitions.ObserveState(
+                                        prevObservationFrame,
+                                        refinedTurnRegion);
+                                    Console.WriteLine(
+                                        $"[turn] automatic observation region refined to ({refinedTurnRegion.Left},{refinedTurnRegion.Top})–({refinedTurnRegion.Right},{refinedTurnRegion.Bottom}); the model still receives the full screen.");
+                                }
+                                if (prevAction is not null &&
+                                    !prevAction.Action.TurnSequenceObserved &&
+                                    IsStateChangingInteractionAction(prevAction.Action))
+                                {
+                                    turnBasedTransitions.RecordTransition(
+                                        prevObservationFrame,
+                                        observationFrame,
+                                        turnRegion,
+                                        prevAction,
+                                        lastObservation);
+                                }
+                                else
+                                {
+                                    turnBasedTransitions.ObserveState(
+                                        observationFrame,
+                                        turnRegion);
+                                }
+                            }
+                            if (lastObservation.ActionOutcome == ActionOutcomeState.NoEffect)
+                                shortTermPlan.Invalidate("the latest planned action had no visible effect");
+                            else if (lastObservation.ActionOutcome == ActionOutcomeState.UnexpectedChange)
+                                shortTermPlan.Invalidate("the latest action produced an unexpected visual change");
+                            if (prevAction?.Action.Type is "drag_path" or "drag_drop" or "hold_keys" ||
+                                string.Equals(
+                                    lastObservation.ActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal))
+                            {
+                                Console.WriteLine(
+                                    $"[observation] result profile={lastObservation.Profile}; " +
+                                    $"policy={lastObservation.ActionPolicy}; visual={lastObservation.VisualChange}; " +
+                                    $"outcome={lastObservation.ActionOutcome}; progress={lastObservation.GoalProgress}; " +
+                                    $"local_delta={(double.IsFinite(lastObservation.LocalDelta) ? lastObservation.LocalDelta.ToString("0.####") : "n/a")}; " +
+                                    $"local_ratio={lastObservation.LocalChangedRatio:0.####}; " +
+                                    $"threshold={lastObservation.ChangeThreshold:0.####}; confidence={lastObservation.Confidence:0.00}");
+                            }
+                            lastGlobalDelta = lastObservation.GlobalDelta;
+                            lastActiveWindowDelta = lastObservation.ActiveWindowDelta;
+                            lastDelta = lastObservation.GoalProgress switch
+                            {
+                                GoalProgressState.Progress => Math.Max(
+                                    lastObservation.EffectiveDelta,
+                                    NoChangeThreshold * 1.2),
+                                GoalProgressState.NoProgress => Math.Min(
+                                    lastObservation.EffectiveDelta,
+                                    NoChangeThreshold * 0.5),
+                                _ => lastObservation.EffectiveDelta
+                            };
+                            bool noChange =
+                                lastObservation.GoalProgress == GoalProgressState.NoProgress;
+                            bool confirmedProgress =
+                                lastObservation.GoalProgress == GoalProgressState.Progress;
+                            bool productiveTurnObservation =
+                                string.Equals(
+                                    lastObservation.ActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal) &&
+                                lastObservation.ActionOutcome == ActionOutcomeState.Confirmed;
+                            bool confirmedStateChange =
+                                lastObservation.ActionOutcome == ActionOutcomeState.Confirmed &&
+                                lastObservation.VisualChange == VisualChangeState.Changed;
+                            bool ambiguousProgress =
+                                lastObservation.GoalProgress == GoalProgressState.Unknown;
+                            var observedNoChange = noChange;
+                            var textEditGrace = ShouldDeferFocusedTextStagnation(
+                                prevAction,
+                                noChange,
+                                textInputNoChangeAttempts);
+                            if (textEditGrace)
+                            {
+                                Console.WriteLine("[observation] focused text edit produced no confirmed pixels; deferring stagnation for one attempt.");
+                                lastObservation = lastObservation with
+                                {
+                                    ActionOutcome = ActionOutcomeState.Ambiguous,
+                                    GoalProgress = GoalProgressState.Unknown,
+                                    Evidence = lastObservation.Evidence + "; focused_text_grace=true"
+                                };
+                                noChange = false;
+                                ambiguousProgress = true;
+                            }
                             bool previousWasObservationOnly = prevAction != null && IsLocalObservationAction(prevAction.Action);
                             expectedContinuousIdle = IsExpectedContinuousIdle(
                                 goalMode,
@@ -201,7 +447,7 @@
 
                             if (ShouldResetRejectedProposalLoop(
                                     prevAction,
-                                    noChange,
+                                    !(confirmedProgress || productiveTurnObservation),
                                     expectedContinuousIdle))
                             {
                                 ClearRejectedProposalLoop();
@@ -210,6 +456,7 @@
                             if (expectedContinuousIdle)
                             {
                                 continuousIdleSteps++;
+                                ambiguousObservationSteps = 0;
                                 stagnationSteps = 0;
                                 repeatCount = 0;
                                 lastSig = null;
@@ -218,13 +465,38 @@
                             else if (!previousWasObservationOnly)
                             {
                                 continuousIdleSteps = 0;
-                                if (noChange) stagnationSteps++; else stagnationSteps = 0;
+                                if (noChange)
+                                {
+                                    ambiguousObservationSteps = 0;
+                                    stagnationSteps++;
+                                }
+                                else if (confirmedProgress || productiveTurnObservation)
+                                {
+                                    ambiguousObservationSteps = 0;
+                                    stagnationSteps = 0;
+                                }
+                                else if (ambiguousProgress)
+                                {
+                                    ambiguousObservationSteps++;
+                                    if (ambiguousObservationSteps >= 3)
+                                        stagnationSteps++;
+                                }
+                                else
+                                {
+                                    ambiguousObservationSteps = 0;
+                                }
                             }
                             else
                             {
                                 continuousIdleSteps = 0;
-                                if (!noChange)
+                                if (confirmedProgress || productiveTurnObservation)
                                     stagnationSteps = 0;
+                            }
+
+                            if (confirmedStateChange)
+                            {
+                                actionCooldownUntilStep.Clear();
+                                spatialActionCooldowns.Clear();
                             }
         
                             if (prevAction != null && !expectedContinuousIdle)
@@ -236,23 +508,25 @@
                                     lastSig,
                                     recentIneffectiveSpatialActions);
 
-                                if (noChange &&
-                                    repeatCount > 0 &&
-                                    ActionRepeatCooldownSteps > 0 &&
-                                    !IsLocalObservationAction(prevAction.Action))
+                                if (ShouldRegisterImmediateNoEffectCooldown(
+                                        prevAction.Action,
+                                        lastObservation,
+                                        repeatCount))
                                 {
                                     RegisterActionCooldown(
                                         prevAction,
                                         step + ActionRepeatCooldownSteps,
                                         actionCooldownUntilStep,
-                                        spatialActionCooldowns);
+                                        spatialActionCooldowns,
+                                        clusterSpatially: repeatCount > 0);
                                 }
                             }
         
                             // Expire AIM after a large visual change
-                            if (lastAimRect is not null && lastDelta > AimExpireDelta)
+                            var broadDelta = Math.Max(lastGlobalDelta, lastActiveWindowDelta);
+                            if (lastAimRect is not null && broadDelta > AimExpireDelta)
                             {
-                                Console.WriteLine($"[aim] expired (delta={lastDelta:0.###} > {AimExpireDelta:0.###})");
+                                Console.WriteLine($"[aim] expired (delta={broadDelta:0.###} > {AimExpireDelta:0.###})");
                                 lastAimRect = null;
                             }
         
@@ -261,14 +535,14 @@
                                 lastPrecisionHint = BuildPrecisionHint(prevAction, lastDelta, "Previous click produced little or no visible progress.");
                                 lastPrecisionHintExpiresAfterStep = step + 1;
                             }
-                            if (noChange && prevAction?.Action.Type == "drag_drop")
+                            if (noChange && prevAction?.Action.Type is "drag_drop" or "drag_path")
                             {
-                                lastPrecisionHint =
-                                    "Previous drag_drop did not visibly move the source or change the destination. " +
-                                    "Do not retry nearby coordinates; verify that the source is draggable, identify the semantic destination, or use a different interaction route.";
+                                lastPrecisionHint = prevAction.Action.Type == "drag_path"
+                                    ? "Previous drag_path did not produce the expected local effect. Do not replay the same path; verify the active tool/surface or change the gesture semantics."
+                                    : "Previous drag_drop did not visibly move the source or change the destination. Do not retry nearby coordinates; verify that the source is draggable, identify the semantic destination, or use a different interaction route.";
                                 lastPrecisionHintExpiresAfterStep = step + 2;
                             }
-                            if (noChange && prevAction != null && IsTextInputAttemptAction(prevAction.Action))
+                            if (observedNoChange && prevAction != null && IsTextInputAttemptAction(prevAction.Action))
                             {
                                 textInputNoChangeAttempts++;
                                 lastTextInputHint = BuildTextInputHint(prevAction.Action, lastDelta);
@@ -276,7 +550,7 @@
                                 if (textInputNoChangeAttempts >= 2)
                                     textInputCooldownUntilStep = Math.Max(textInputCooldownUntilStep, step + 4);
                             }
-                            else if (!noChange)
+                            else if (confirmedProgress || productiveTurnObservation)
                             {
                                 lastPrecisionHint = null;
                                 lastPrecisionHintExpiresAfterStep = 0;
@@ -287,15 +561,62 @@
                             }
                         }
         
-                        var previousResponseIdForRequest = UsePreviousResponseState ? previousControlResponseId : null;
+                        var previousResponseIdForRequest = controlContextChain.PreviousResponseIdForRequest;
                         var historyTail = previousResponseIdForRequest != null || HistoryTailChars <= 0
                             ? ""
                             : TailHistory(historyBuffer, HistoryTailChars, HistoryTailLines);
                         var (screenCx, screenCy, _, _) = GetCursorPositionInPrimary();
                         var (cx, cy, cnx, cny) = CursorToImageCoordinates(screenCx, screenCy);
-                        var promptContext = CaptureUiPromptContext(focusUiaSummary, screenW, screenH);
                         var appliedFocusRectForPrompt = ScreenRectToImage(appliedFocusRect);
                         var focusUiaRectForPrompt = ScreenRectToImage(focusUiaRect);
+                        var currentTurnFocusPath =
+                            appliedFocusRect is not null &&
+                            focusUrl != null &&
+                            LogScreens
+                                ? ScreenLogPath(screensDir, $"{commandId}_{step}_crop")
+                                : null;
+                        var currentTurnEvidenceDataUrl =
+                            appliedFocusRect is Rectangle activeFocusRegion &&
+                            turnBasedInteractionRect is Rectangle activeTurnRegion &&
+                            activeFocusRegion == activeTurnRegion &&
+                            focusUrl != null
+                                ? focusUrl
+                                : null;
+                        var currentTurnEvidencePath = currentTurnEvidenceDataUrl is not null
+                            ? currentTurnFocusPath
+                            : null;
+                        if (currentTurnEvidenceDataUrl is null &&
+                            turnBasedInteractionRegionIsAutomatic &&
+                            turnBasedAutomaticRegionRefined &&
+                            turnBasedInteractionRect is Rectangle automaticEvidenceRegion &&
+                            TryBuildTurnRegionEvidenceImage(
+                                dataUrl,
+                                automaticEvidenceRegion,
+                                observationFrame.ScreenBounds,
+                                screensDir,
+                                commandId,
+                                step,
+                                out var automaticEvidenceDataUrl,
+                                out var automaticEvidencePath))
+                        {
+                            currentTurnEvidenceDataUrl = automaticEvidenceDataUrl;
+                            currentTurnEvidencePath = automaticEvidencePath;
+                        }
+                        var hasPersistentTurnFocus =
+                            currentTurnEvidenceDataUrl is not null;
+                        var hasTurnVisualContext =
+                            string.Equals(
+                                observationSession.EffectiveProfile,
+                                "turn_based_interaction",
+                                StringComparison.Ordinal) &&
+                            turnBasedInteractionRect is not null &&
+                            currentTurnEvidenceDataUrl is not null;
+                        if (hasPersistentTurnFocus && turnReferenceFocusDataUrl is null)
+                        {
+                            turnReferenceFocusDataUrl = currentTurnEvidenceDataUrl;
+                            turnReferenceFocusPath = currentTurnEvidencePath;
+                            Console.WriteLine("[turn-memory] captured initial interaction reference image.");
+                        }
                         var loopAssessment = AssessVisualStateCycle(
                             loopStateGraph,
                             shotFingerprint,
@@ -307,7 +628,9 @@
                             lastDelta,
                             goalMode: goalMode,
                             recurringWorkflowIntent:
-                                recurringWorkflowIntent);
+                                recurringWorkflowIntent,
+                            goalProgress:
+                                lastObservation?.GoalProgress ?? GoalProgressState.Unknown);
                         var proactiveVisualCycle = loopAssessment.IsLoop;
                         var visualCycleLength = loopAssessment.CycleLength;
                         if (proactiveVisualCycle)
@@ -327,6 +650,7 @@
                             prevAction,
                             lastDelta,
                             loopAssessment,
+                            lastObservation,
                             goalMode,
                             recurringWorkflowIntent);
 
@@ -336,6 +660,7 @@
                             stagnationSteps,
                             repeatCount,
                             lastDelta,
+                            lastObservation,
                             shotFingerprint,
                             activeWindowFingerprint,
                             prevAction,
@@ -422,8 +747,8 @@
                             goal);
         
                         var reuseUiaTargets = ReuseUiaTargetsWhenScreenUnchanged &&
-                                              !double.IsNaN(lastDelta) &&
-                                              lastDelta < NoChangeThreshold &&
+                                              lastObservation?.VisualChange == VisualChangeState.Stable &&
+                                              lastObservation.SemanticStateChanged == false &&
                                               CurrentUiaTargets.Count > 0;
                         PrepareUiaTargetsForPrompt(reuseUiaTargets, screenW, screenH);
         
@@ -431,23 +756,74 @@
                             stagnationSteps,
                             repeatCount,
                             rejectedProposalCycleCount);
+                        if (!string.IsNullOrWhiteSpace(lastExecutorFailure))
+                            shortTermPlan.Invalidate($"executor rejected or failed the planned action: {TrimForMeta(lastExecutorFailure, 160)}");
+                        var controlMaxOutputTokens =
+                            EffectiveControlMaxOutputTokens(
+                                turnBasedTransitions.RequiresReanalysis);
+                        if (turnBasedTransitions.RequiresReanalysis &&
+                            controlMaxOutputTokens > MaxOutputTokens)
+                        {
+                            Console.WriteLine(
+                                $"[openai] salient turn reanalysis budget elevated: {MaxOutputTokens}->{controlMaxOutputTokens} tokens.");
+                        }
         
                         // inject observation metrics into the prompt
                         var metaSb = new StringBuilder()
-                            .AppendLine($"LAST_STEP_DELTA: {(double.IsNaN(lastDelta) ? "N/A" : lastDelta.ToString("0.####"))} (threshold={NoChangeThreshold})")
+                            .AppendLine($"LAST_STEP_DELTA: {(double.IsNaN(lastDelta) ? "N/A" : lastDelta.ToString("0.####"))} (observation_threshold={lastObservation?.ChangeThreshold ?? NoChangeThreshold:0.####})")
                             .AppendLine($"LAST_GLOBAL_DELTA: {(double.IsNaN(lastGlobalDelta) ? "N/A" : lastGlobalDelta.ToString("0.####"))}; LAST_ACTIVE_WINDOW_DELTA: {(double.IsNaN(lastActiveWindowDelta) ? "N/A" : lastActiveWindowDelta.ToString("0.####"))}")
+                            .AppendLine($"LAST_LOCAL_DELTA: {(lastObservation is not null && double.IsFinite(lastObservation.LocalDelta) ? lastObservation.LocalDelta.ToString("0.####") : "N/A")}; LAST_LOCAL_CHANGED_RATIO: {(lastObservation is null ? "N/A" : lastObservation.LocalChangedRatio.ToString("0.####"))}")
+                            .AppendLine($"OBSERVATION_PROFILE: {lastObservation?.Profile ?? observationSession.EffectiveProfile}; ACTION_OBSERVATION_POLICY: {lastObservation?.ActionPolicy ?? "N/A"}; VISUAL_CHANGE: {lastObservation?.VisualChange.ToString() ?? "N/A"}; ACTION_OUTCOME: {lastObservation?.ActionOutcome.ToString() ?? "N/A"}; GOAL_PROGRESS: {lastObservation?.GoalProgress.ToString() ?? "N/A"}; OBSERVATION_CONFIDENCE: {(lastObservation is null ? "N/A" : lastObservation.Confidence.ToString("0.00"))}")
                             .AppendLine($"STAGNATION_STEPS: {stagnationSteps}")
                             .AppendLine($"REPEAT_COUNT: {repeatCount}")
                             .AppendLine($"REJECTED_PROPOSAL_CYCLE_COUNT: {rejectedProposalCycleCount}")
                             .AppendLine($"CONTINUOUS_IDLE_STEPS: {continuousIdleSteps}")
+                            .AppendLine($"AMBIGUOUS_OBSERVATION_STEPS: {ambiguousObservationSteps}")
+                            .AppendLine($"INSPECTION_ACTIONS: {observationActionGuard.ConsecutiveInspectionActions}/{(MaxConsecutiveInspectionActions > 0 ? MaxConsecutiveInspectionActions.ToString() : "unlimited")}; AIM_SINCE_INTERACTION: {observationActionGuard.AimIssuedSinceInteraction.ToString().ToLowerInvariant()}")
                             .AppendLine($"GOAL_MODE: {goalMode}")
                             .AppendLine($"REQUEST_REASONING_EFFORT: {RequestReasoningEffortOverride ?? ReasoningEffort ?? "default"}")
+                            .AppendLine($"REQUEST_MAX_OUTPUT_TOKENS: {controlMaxOutputTokens}")
                             .AppendLine($"LAST_ACTION: {(prevAction == null ? "N/A" : prevAction.Description)}")
-                            .AppendLine($"AIM_ACTIVE: {(lastAimRect is null ? "false" : $"true {FormatImageRect(CurrentScreenMap.ScreenToImageRect(lastAimRect.Value))}")}");
+                            .AppendLine($"AIM_ACTIVE: {(lastAimRect is null ? "false" : $"true {FormatImageRect(CurrentScreenMap.ScreenToImageRect(lastAimRect.Value))}")}")
+                            .AppendLine("CONTEXT_CHECKPOINT_VERSION: 1; the current screen and runtime state below are authoritative when they conflict with earlier model reasoning.");
+                        var recentActionCheckpoint = BuildRecentActionCheckpoint(recentExecutedActions);
+                        if (!string.IsNullOrWhiteSpace(recentActionCheckpoint))
+                            metaSb.AppendLine(recentActionCheckpoint);
+                        var shortTermPlanSummary = shortTermPlan.BuildPromptSummary();
+                        if (!string.IsNullOrWhiteSpace(shortTermPlanSummary))
+                            metaSb.AppendLine(shortTermPlanSummary);
                         if (repeatCount > 0 || stagnationSteps > 0)
                             metaSb.AppendLine("STRATEGY_HINT: The previous action did not visibly advance the screen. Do not repeat it; choose a different UI route or ask for a crop if the target is ambiguous.");
+                        if (prevAction is not null &&
+                            lastObservation is not null &&
+                            ShouldRegisterImmediateNoEffectCooldown(
+                                prevAction.Action,
+                                lastObservation,
+                                repeatCount))
+                        {
+                            metaSb.AppendLine(
+                                "NO_EFFECT_ACTION_BLOCKED: LAST_ACTION is unavailable until the observed state changes. Do not propose it again; choose a different input modality, target, or diagnostic action.");
+                        }
                         if (expectedContinuousIdle)
                             metaSb.AppendLine("CONTINUOUS_IDLE: The previous wait left the screen unchanged, which is valid for this open-ended goal. Reassess whether the requested state is still healthy or whether a new event is present; wait again only when continued observation is goal-aligned.");
+                        if (ambiguousObservationSteps > 0)
+                            metaSb.AppendLine("AMBIGUOUS_ACTION_OUTCOME: Visual activity was observed, but it could not be attributed confidently to the previous action. Reassess the state and expected effect; do not blindly repeat the same input.");
+                        if (observationActionGuard.RequiresInteraction(MaxConsecutiveInspectionActions))
+                            metaSb.AppendLine("INTERACTION_REQUIRED: The inspection budget is exhausted. request_crop and point are mechanically blocked until RDPilot executes a state-changing interaction. Use visible controls or one safe, reversible input and then observe its effect; use aim only when precise pointer targeting is required.");
+                        if (string.Equals(observationSession.EffectiveProfile, "turn_based_interaction", StringComparison.Ordinal))
+                        {
+                            metaSb.AppendLine(turnBasedTransitions.CanProposeExecutionBatch
+                                ? $"TURN_BASED_INTERACTION: aggressive execution_ready batching is the default from the first visible route. Commit to the strongest visible control hypothesis and test it with a reversible route; semantic uncertainty is not a reason to inspect HELP, narrate, or delay. Before the first directional input, request_crop is justified only when the board is physically unreadable at the supplied resolution, and HELP/instructions are justified only when no reversible control input is visible. Preliminary single-move calibration is forbidden when at least two reversible moves form a coherent route. Bind the route to TURN_STATE with planned_inputs, plan_waypoint, and plan_confidence. When fixed visible directional controls such as a D-pad exist and keyboard focus has not been confirmed by a successful move, prefer an ordered click sequence over keyboard keys. If a keyboard direction had no effect, preserve the logical route and immediately remap its longest valid prefix to those visible controls; do not test only one button. Send up to {turnBasedTransitions.AdvertisedMaxExecutionBatchLength} observed click/key inputs and include every visible unconditional turn before the next semantic uncertainty; do not pad a route merely to reach the cap. A small or distant recurring auxiliary UI change is recorded but does not stop execution. A blocked input, unavailable observation, broad screen/state transition, or novel local-to-distant causal change interrupts the batch. Do not use hold_keys for discrete movement."
+                                : "TURN_BASED_INTERACTION: The interaction is in an exploration or reanalysis phase. Promptly perform exactly one maximally informative, reversible input, then inspect the resulting frame. Do not spend this turn narrating or solving a full route. Compare labeled temporal images and the reported change regions before acting. Prefer a visible directional/control button or a single Arrow/WASD/Space/F key when the interface suggests those controls. Keep planned_inputs null unless the route is already mechanically established. Do not use hold_keys or batch speculative moves.");
+                            if (turnBasedTransitions.CanProposeExecutionBatch)
+                            {
+                                metaSb.AppendLine(
+                                    "TURN_ROUTE_DECISION_MODE: commit_fast. Do not exhaustively solve hidden mechanics before acting. Choose the strongest visible unconditional route, emit its structured key sequence immediately, and let the per-input observation barrier expose mistaken assumptions.");
+                            }
+                            var transitionSummary = turnBasedTransitions.BuildPromptSummary();
+                            if (!string.IsNullOrWhiteSpace(transitionSummary))
+                                metaSb.AppendLine(transitionSummary);
+                        }
                         if (recoveryEpisode != null &&
                             stagnationSteps < RecoveryMemoryTriggerSteps &&
                             repeatCount < 1)
@@ -487,27 +863,134 @@
         
                         var omitFullScreenImage = OmitUnchangedScreenImageWithState &&
                                                   previousResponseIdForRequest != null &&
-                                                  !double.IsNaN(lastDelta) &&
-                                                  lastDelta < NoChangeThreshold;
+                                                  lastObservation?.VisualChange == VisualChangeState.Stable;
                         if (omitFullScreenImage)
                             metaSb.AppendLine("SCREEN_IMAGE: omitted because screen fingerprint is unchanged; use previous_response_id state plus current metadata.");
-        
+
+                        var turnChangeImages = new List<TurnChangeImagePair>();
+                        if (hasPersistentTurnFocus &&
+                            turnBasedTransitions.RequiresReanalysis &&
+                            previousTurnFocusDataUrl is not null &&
+                            currentTurnEvidenceDataUrl is not null)
+                        {
+                            var regionIndex = 1;
+                            foreach (var changeRegion in turnBasedTransitions.SalientChangeRegions)
+                            {
+                                var pair = BuildTurnChangeImagePair(
+                                    previousTurnFocusDataUrl,
+                                    currentTurnEvidenceDataUrl,
+                                    changeRegion,
+                                    screensDir,
+                                    commandId,
+                                    step,
+                                    regionIndex++);
+                                if (pair is not null)
+                                    turnChangeImages.Add(pair);
+                            }
+                            if (turnChangeImages.Count > 0)
+                            {
+                                activeTurnChangeImages = turnChangeImages;
+                                Console.WriteLine(
+                                    $"[turn-event] attached {turnChangeImages.Count} focused before/after change-region pair(s).");
+                            }
+                        }
+                        IReadOnlyList<TurnChangeImagePair> requestTurnChangeImages =
+                            turnBasedTransitions.RequiresReanalysis ||
+                            turnBasedTransitions.HasActiveCausalEvent
+                                ? activeTurnChangeImages
+                                : [];
+                        var includeTurnTemporalImages =
+                            hasTurnVisualContext &&
+                            (turnBasedTransitions.RequiresReanalysis ||
+                             turnBasedTransitions.HasActiveCausalEvent ||
+                             !turnBasedTransitions.CanUseExecutionBatch ||
+                             !shortTermPlan.HasActivePlan);
+                        if (hasTurnVisualContext && !includeTurnTemporalImages)
+                        {
+                            metaSb.AppendLine(
+                                "TURN_TEMPORAL_IMAGES: omitted during predictable plan execution; use CURRENT_FOCUS_IMAGE and the transition ledger. Full before/reference evidence will return after an invalidating or salient change.");
+                        }
+
+                        var focusDataUrlForRequest = focusUrl ?? currentTurnEvidenceDataUrl;
+                        var focusRectForRequest = appliedFocusRectForPrompt ??
+                                                  (focusUrl is null &&
+                                                   turnBasedInteractionRect is Rectangle evidenceRegion
+                                                      ? ScreenRectToImage(evidenceRegion)
+                                                      : null);
+                        var focusPathForRequest = currentTurnFocusPath ?? currentTurnEvidencePath;
+                        var previousTurnImageForRequest = includeTurnTemporalImages
+                            ? previousTurnFocusDataUrl
+                            : null;
+                        var referenceTurnImageForRequest = includeTurnTemporalImages
+                            ? turnReferenceFocusDataUrl
+                            : null;
+                        var previousTurnImageAttached =
+                            previousTurnImageForRequest is not null &&
+                            !string.Equals(
+                                previousTurnImageForRequest,
+                                focusDataUrlForRequest,
+                                StringComparison.Ordinal);
+                        var referenceTurnImageAttached =
+                            referenceTurnImageForRequest is not null &&
+                            !string.Equals(
+                                referenceTurnImageForRequest,
+                                focusDataUrlForRequest,
+                                StringComparison.Ordinal) &&
+                            !string.Equals(
+                                referenceTurnImageForRequest,
+                                previousTurnImageForRequest,
+                                StringComparison.Ordinal);
+                        metaSb.AppendLine(
+                            $"TURN_TEMPORAL_EVIDENCE: current={(focusDataUrlForRequest is null ? "absent" : "attached")}; previous={(previousTurnImageAttached ? "attached" : "absent")}; reference={(referenceTurnImageAttached ? "attached" : "absent")}; change_pairs={requestTurnChangeImages.Count}.");
                         var reqBody = BuildRequestBody(Model, systemRules, goal, historyTail + "\n" + metaSb, dataUrl, imageW, imageH,
-                                                       cx, cy, cnx, cny, focusUrl, appliedFocusRectForPrompt, focusUiaRectForPrompt, focusUiaDataUrl,
-                                                       promptContext, reuseUiaTargets, previousResponseIdForRequest, omitFullScreenImage, goalMode);
+                                                       cx, cy, cnx, cny, focusDataUrlForRequest, focusRectForRequest, focusUiaRectForPrompt, focusUiaDataUrl,
+                                                       promptContext, reuseUiaTargets, previousResponseIdForRequest, omitFullScreenImage, goalMode,
+                                                       previousTurnImageForRequest,
+                                                        referenceTurnImageForRequest,
+                                                        requestTurnChangeImages,
+                                                        controlMaxOutputTokens,
+                                                        controlContextChain.CompactionEnabled,
+                                                        controlContextChain.Enabled);
                         if (LogRequests)
                         {
                             var reqBodyForLog = BuildRequestBody_ForLog(Model, systemRules, goal, historyTail + "\n" + metaSb,
                                                                         omitFullScreenImage ? null : savedPath, imageW, imageH, cx, cy, cnx, cny,
-                                                                        appliedFocusRect != null && LogScreens ? ScreenLogPath(screensDir, $"{commandId}_{step}_crop") : null,
-                                                                        appliedFocusRectForPrompt,
-                                                                        focusUiaRectForPrompt, focusUiaPath, promptContext, previousResponseIdForRequest, omitFullScreenImage, goalMode);
+                                                                        focusPathForRequest,
+                                                                        focusRectForRequest,
+                                                                        focusUiaRectForPrompt, focusUiaPath, promptContext, previousResponseIdForRequest, omitFullScreenImage, goalMode,
+                                                                        includeTurnTemporalImages ? previousTurnFocusPath : null,
+                                                                         includeTurnTemporalImages ? turnReferenceFocusPath : null,
+                                                                         requestTurnChangeImages,
+                                                                         controlMaxOutputTokens,
+                                                                         controlContextChain.CompactionEnabled,
+                                                                         controlContextChain.Enabled);
                             SaveJson(Path.Combine(requestsDir, $"{commandId}_{step}_request.json"), reqBodyForLog);
                         }
+                        if (hasPersistentTurnFocus)
+                        {
+                            previousTurnFocusDataUrl = currentTurnEvidenceDataUrl;
+                            previousTurnFocusPath = currentTurnEvidencePath;
+                        }
         
-                        var (action, raw) = await CallOpenAIAsync(apiKey, reqBody, cancelCts.Token);
-                        if (UsePreviousResponseState)
-                            previousControlResponseId = LastOpenAiResponseId ?? previousControlResponseId;
+                        controlContextChain.LogRequest(step);
+                        var (action, raw, completedResponseId, contextFallbackUsed, compactionFallbackUsed, compactionOccurred) = await CallOpenAIAsync(
+                            apiKey,
+                            reqBody,
+                            cancelCts.Token,
+                            AllowsStableCanvasDrawBatch(
+                                promptContext,
+                                observationSession.EffectiveProfile),
+                            turnBasedInteractionRect is not null &&
+                            turnBasedTransitions.CanProposeExecutionBatch
+                                ? Math.Max(
+                                    0,
+                                    turnBasedTransitions.AdvertisedMaxExecutionBatchLength - 1)
+                                : 0);
+                        controlContextChain.RecordResult(
+                            completedResponseId,
+                            contextFallbackUsed,
+                            compactionFallbackUsed,
+                            compactionOccurred);
                         RequestReasoningEffortOverride = null;
                         SaveRaw(Path.Combine(requestsDir, $"{commandId}_{step}_response.json"), raw);
         
@@ -533,6 +1016,8 @@
                                 prevAction = null;
                                 prevShotFingerprint = null;
                                 prevActiveWindowFingerprint = null;
+                                prevObservationFrame = null;
+                                prevObservationContext = null;
                                 await Task.Delay(750, cancelCts.Token);
                                 continue;
                             }
@@ -546,7 +1031,82 @@
                         }
                         consecutiveModelFailures = 0;
         
-                        var currentAction = CaptureResolvedAction(action, lastAimRect);
+                        var currentAction = AttachFocusedTextObservationRegion(
+                            CaptureResolvedAction(action, lastAimRect),
+                            focusUiaRect);
+                        var currentActionPolicy = observationSession.ResolveActionPolicy(
+                            currentAction,
+                            promptContext,
+                            goal);
+                        currentAction = AttachTurnBasedObservationRegion(
+                            currentAction,
+                            ResolveTurnBasedObservationRegion(
+                                turnBasedInteractionRect,
+                                currentActionPolicy),
+                            currentActionPolicy);
+                        var isTurnBasedAction = string.Equals(
+                            currentActionPolicy,
+                            "turn_based_interaction",
+                            StringComparison.Ordinal);
+                        shortTermPlan.Update(
+                            action,
+                            isTurnBasedAction
+                                ? turnBasedTransitions.CurrentStateId
+                                : null);
+                        if (isTurnBasedAction &&
+                            PendingSafeActions.Count == 0 &&
+                            action.Type is "click" or "double_click" &&
+                            action.PlannedInputs is { Length: > 1 } observedPlannedInputs &&
+                            OpenAiResponsesService.TryBindObservedTurnActionToPlannedInput(
+                                action,
+                                observedPlannedInputs[0]) &&
+                            shortTermPlan.TryExpandDirectionalSequence(
+                                [observedPlannedInputs[0]],
+                                turnBasedTransitions.CurrentStateId,
+                                turnBasedTransitions.MaxExecutionBatchLength,
+                                out var expandedObservedInputs) &&
+                            turnBasedTransitions.TryBuildObservedDirectionalFollowUps(
+                                action,
+                                expandedObservedInputs.Skip(1).ToArray(),
+                                out var inferredObservedFollowUps))
+                        {
+                            foreach (var followUp in inferredObservedFollowUps)
+                                PendingSafeActions.Enqueue(followUp);
+                            Console.WriteLine(
+                                $"[turn-plan] expanded one observed click into {expandedObservedInputs.Length} route inputs using learned control positions.");
+                        }
+                        if (isTurnBasedAction &&
+                            action.Type == "keys" &&
+                            action.Keys is { Length: > 0 } proposedKeys &&
+                            TryGetTurnBasedDirectionalSequenceLength(
+                                action,
+                                out _) &&
+                            turnBasedTransitions.CanUseExecutionBatch &&
+                            shortTermPlan.TryExpandDirectionalSequence(
+                                proposedKeys,
+                                turnBasedTransitions.CurrentStateId,
+                                turnBasedTransitions.MaxExecutionBatchLength,
+                                out var expandedKeys))
+                        {
+                            Console.WriteLine(
+                                $"[turn-plan] expanded model batch {proposedKeys.Length}->{expandedKeys.Length} from the high-confidence structured route.");
+                            action.Keys = expandedKeys;
+                            currentAction = AttachTurnBasedObservationRegion(
+                                AttachFocusedTextObservationRegion(
+                                    CaptureResolvedAction(action, lastAimRect),
+                                    focusUiaRect),
+                                ResolveTurnBasedObservationRegion(
+                                    turnBasedInteractionRect,
+                                    currentActionPolicy),
+                                currentActionPolicy);
+                        }
+                        if (string.Equals(
+                                currentActionPolicy,
+                                "turn_based_interaction",
+                                StringComparison.Ordinal))
+                        {
+                            turnBasedTransitions.UpdateWorkingMemory(action);
+                        }
                         Console.WriteLine($"[{step}] {currentAction.Description}");
                         if (action.Confidence is double confidence)
                             Console.WriteLine($"     confidence: {confidence:0.##}");
@@ -557,10 +1117,107 @@
                         var actionExecutionFailed = false;
                         var actionExecuted = false;
                         var actionWasLocallyRejected = false;
+                        var turnBatchObserved = false;
+                        var turnReanalysisWasRequired =
+                            turnBasedTransitions.RequiresReanalysis;
+                        ScreenObservationFrame? actionBaselineFrame = null;
+                        byte[]? actionBaselineLocalFingerprint = null;
                         try
                         {
                             if (!currentAction.IsValid)
                                 throw new InvalidOperationException(currentAction.ValidationError);
+
+                            if (string.Equals(
+                                    currentActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal) &&
+                                IsStateChangingInteractionAction(currentAction.Action) &&
+                                turnBasedInteractionWindow != IntPtr.Zero &&
+                                GetForegroundWindow() != turnBasedInteractionWindow &&
+                                !TryRestoreForegroundWindow(turnBasedInteractionWindow))
+                            {
+                                throw new InvalidOperationException(
+                                    "the remembered turn-based interaction window could not regain focus");
+                            }
+
+                            if (string.Equals(
+                                    currentActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal) &&
+                                TryGetTurnBasedDirectionalSequenceLength(
+                                    currentAction.Action,
+                                    out var directionalSequenceLength) &&
+                                directionalSequenceLength > 1 &&
+                                (!turnBasedTransitions.CanUseExecutionBatch ||
+                                 directionalSequenceLength >
+                                 turnBasedTransitions.MaxExecutionBatchLength))
+                            {
+                                throw new InvalidOperationException(
+                                    turnBasedTransitions.CanUseExecutionBatch
+                                        ? $"turn-based execution batches currently accept at most {turnBasedTransitions.MaxExecutionBatchLength} directional inputs"
+                                        : "multiple directional inputs are blocked until turn-based exploration is complete");
+                            }
+
+                            if (string.Equals(
+                                    currentActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal) &&
+                                TryGetTurnBasedDirectionalSequenceLength(
+                                    currentAction.Action,
+                                    out _) &&
+                                currentAction.Action.Keys is { Length: > 0 } routeKeys &&
+                                !shortTermPlan.ProposedSequenceMatches(
+                                    routeKeys,
+                                    turnBasedTransitions.CurrentStateId,
+                                    out var routeMismatchReason))
+                            {
+                                shortTermPlan.Invalidate(routeMismatchReason);
+                                throw new InvalidOperationException(routeMismatchReason);
+                            }
+
+                            if (string.Equals(
+                                    currentActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal) &&
+                                turnBasedTransitions.RequiresReanalysis &&
+                                IsStateChangingInteractionAction(currentAction.Action) &&
+                                !turnBasedTransitions.HasRequiredSalientObservation(action))
+                            {
+                                const string missingObservationReason =
+                                    "a salient world change must be described in salient_change_observation before another state-changing input";
+                                Console.WriteLine(
+                                    $"[guard] turn reanalysis action blocked: {missingObservationReason}");
+                                AddHistory(
+                                    historyBuffer,
+                                    $"[{step}] IGNORED (salient_change_not_observed): {currentAction.Description}");
+                                lastExecutorFailure = missingObservationReason;
+                                PendingSafeActions.Clear();
+                                RegisterRejectedProposal(currentAction);
+                                prevAction = null;
+                                prevShotFingerprint = null;
+                                prevActiveWindowFingerprint = null;
+                                prevObservationFrame = null;
+                                prevObservationContext = null;
+                                continue;
+                            }
+
+                            if (observationActionGuard.TryGetBlockReason(
+                                    currentAction,
+                                    MaxConsecutiveInspectionActions,
+                                    out var observationBlockReason))
+                            {
+                                Console.WriteLine($"[guard] observation action blocked: {observationBlockReason}");
+                                AddHistory(historyBuffer, $"[{step}] IGNORED (observation_budget): {currentAction.Description}");
+                                lastExecutorFailure = observationBlockReason;
+                                PendingSafeActions.Clear();
+                                RegisterRejectedProposal(currentAction);
+                                prevAction = null;
+                                prevShotFingerprint = null;
+                                prevActiveWindowFingerprint = null;
+                                prevObservationFrame = null;
+                                prevObservationContext = null;
+                                continue;
+                            }
 
                             if (IsActionOnCooldown(currentAction, step, actionCooldownUntilStep, spatialActionCooldowns, out var cooldownUntil))
                             {
@@ -577,6 +1234,8 @@
                                 prevAction = null;
                                 prevShotFingerprint = null;
                                 prevActiveWindowFingerprint = null;
+                                prevObservationFrame = null;
+                                prevObservationContext = null;
                                 continue;
                             }
                             if (IsTextInputAttemptAction(action) && textInputCooldownUntilStep >= step)
@@ -591,7 +1250,84 @@
                                 prevAction = null;
                                 prevShotFingerprint = null;
                                 prevActiveWindowFingerprint = null;
+                                prevObservationFrame = null;
+                                prevObservationContext = null;
                                 continue;
+                            }
+
+                            if (ActionNeedsEffectObservation(action) &&
+                                (!IsMouseAction(action) || MouseEnabled))
+                            {
+                                actionBaselineFrame = CaptureObservationFrameProbe(
+                                    currentAction.ObservationRegion is not null ||
+                                    action.Type is "drag_drop" or "drag_path" or "type_text" or "paste_text");
+                                if (currentAction.ObservationRegion is Rectangle localRegion)
+                                {
+                                    actionBaselineLocalFingerprint = CaptureRegionFingerprintProbe(localRegion);
+                                }
+                                if (string.Equals(
+                                        currentActionPolicy,
+                                        "turn_based_interaction",
+                                        StringComparison.Ordinal) &&
+                                    turnBasedInteractionRect is Rectangle persistentTurnRegion)
+                                {
+                                    var baselineAssessment = turnBasedTransitions.PrepareActionBaseline(
+                                        actionBaselineFrame,
+                                        persistentTurnRegion);
+                                    if (baselineAssessment.ExternalStateChange)
+                                    {
+                                        Console.WriteLine(
+                                            $"[turn] external state change detected while awaiting the model; discarding stale action; {baselineAssessment.Summary}");
+                                        AddHistory(
+                                            historyBuffer,
+                                            $"[{step}] stale_action_discarded: external state changed while model was planning");
+                                        PendingSafeActions.Clear();
+                                        BeginExternalStateEpoch();
+                                        lastExecutorFailure =
+                                            "The interaction state changed externally while the model was planning. Reinspect the fresh state before acting.";
+                                        prevAction = null;
+                                        prevShotFingerprint = null;
+                                        prevActiveWindowFingerprint = null;
+                                        prevObservationFrame = null;
+                                        prevObservationContext = null;
+                                        continue;
+                                    }
+                                }
+                                else if (ShouldCheckPreRegionTurnActionFreshness(
+                                             currentActionPolicy,
+                                             turnBasedInteractionRect,
+                                             currentAction.Action))
+                                {
+                                    await Task.Delay(120, cancelCts.Token);
+                                    var confirmationFrame = CaptureObservationFrameProbe(
+                                        includeDetail: false);
+                                    if (ShouldDiscardPreRegionTurnAction(
+                                            observationFrame,
+                                            actionBaselineFrame,
+                                            confirmationFrame,
+                                            out var promptDelta,
+                                            out var stabilityDelta))
+                                    {
+                                        Console.WriteLine(
+                                            $"[turn] pre-region state changed while awaiting the model; discarding stale action; prompt_delta={promptDelta:0.####}; stability_delta={stabilityDelta:0.####}");
+                                        AddHistory(
+                                            historyBuffer,
+                                            $"[{step}] stale_action_discarded: pre-region screen changed while model was planning");
+                                        PendingSafeActions.Clear();
+                                        lastExecutorFailure =
+                                            "The visible turn-based state changed while the model was planning. Reinspect the fresh screen and act on its current controls.";
+                                        prevAction = null;
+                                        prevShotFingerprint = null;
+                                        prevActiveWindowFingerprint = null;
+                                        prevObservationFrame = null;
+                                        prevObservationContext = null;
+                                        continue;
+                                    }
+                                    actionBaselineFrame = confirmationFrame;
+                                }
+                                observationSession.RecordAmbientMotion(
+                                    observationFrame,
+                                    actionBaselineFrame);
                             }
         
                             // ——— Mouse policy: global switch ———
@@ -624,6 +1360,45 @@
                                 var rect = ResolveCropRect(action);
                                 if (rect is null) throw new InvalidOperationException("request_crop without parameters.");
                                 nextFocusRect = rect.Value;
+                                if (string.Equals(
+                                        currentActionPolicy,
+                                        "turn_based_interaction",
+                                        StringComparison.Ordinal))
+                                {
+                                    var clamped = ClampRect(rect.Value);
+                                    if (turnBasedInteractionRect is Rectangle existingTurnRegion &&
+                                        !(turnBasedInteractionRegionIsAutomatic &&
+                                          ShouldEstablishTurnBasedInteractionRegion(
+                                              action,
+                                              regionRequired: false)))
+                                    {
+                                        var inspectionKind = IsOverlappingTurnInspection(
+                                                existingTurnRegion,
+                                                clamped)
+                                            ? "overlapping"
+                                            : "auxiliary";
+                                        Console.WriteLine(
+                                            $"[turn] transient {inspectionKind} inspection crop=({clamped.Left},{clamped.Top})–({clamped.Right},{clamped.Bottom}); preserving primary interaction region, transitions, and visual memory.");
+                                    }
+                                    else if (ShouldEstablishTurnBasedInteractionRegion(
+                                                 action,
+                                                 regionRequired: false))
+                                    {
+                                        turnBasedInteractionRect = clamped;
+                                        turnBasedInteractionRegionIsAutomatic = false;
+                                        turnBasedAutomaticRegionRefined = false;
+                                        turnBasedInteractionWindow = GetForegroundWindow();
+                                        turnBasedInteractionContext = currentTurnBasedContext;
+                                        previousTurnFocusDataUrl = null;
+                                        previousTurnFocusPath = null;
+                                        turnReferenceFocusDataUrl = null;
+                                        turnReferenceFocusPath = null;
+                                        activeTurnChangeImages = [];
+                                        turnBasedTransitions.Reset();
+                                        Console.WriteLine(
+                                            $"[turn] persistent interaction region set to ({clamped.Left},{clamped.Top})–({clamped.Right},{clamped.Bottom}).");
+                                    }
+                                }
                                 actionExecuted = true;
                             }
                             else if (action.Type == "wait")
@@ -662,7 +1437,7 @@
                                     if (RefreshScreenshotBeforeVerify)
                                     {
                                         await Task.Delay(UiSettleDelayMs, cancelCts.Token); // give UI time for slow apps when explicitly requested
-                                        var (freshDataUrl, freshPath, freshW, freshH, freshImageW, freshImageH, _, _, freshFocusRect, freshFocusSummary, _, _, _, _) = ScreenshotToDataUrl(screensDir, commandId, step, null);
+                                        var (freshDataUrl, freshPath, freshW, freshH, freshImageW, freshImageH, _, _, freshFocusRect, freshFocusSummary, _, _, _, _, _) = ScreenshotToDataUrl(screensDir, commandId, step, null);
                                         verifyDataUrl = freshDataUrl;
                                         verifyPath = freshPath;
                                         verifyRealScreenW = freshW;
@@ -692,8 +1467,21 @@
                                     }
                                     if (verify?.Verdict?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true)
                                     {
-                                        Console.WriteLine($"[verify] ✅ Goal confirmed: {verify.Reason}");
-                                        AddHistory(historyBuffer, $"[{step}] done_verified");
+                                        if (independentlyVerified)
+                                        {
+                                            Console.WriteLine($"[verify] ✅ Goal independently confirmed: {verify.Reason}");
+                                            AddHistory(historyBuffer, $"[{step}] done_verified");
+                                        }
+                                        else
+                                        {
+                                            var confidenceText = action.Confidence is double doneConfidenceForLog
+                                                ? doneConfidenceForLog.ToString("0.00")
+                                                : "n/a";
+                                            Console.WriteLine(
+                                                $"[verify] ⏭ Independent verification skipped; " +
+                                                $"{VerificationSkipReason(step, action)}; accepting model done (confidence={confidenceText}).");
+                                            AddHistory(historyBuffer, $"[{step}] done_accepted_unverified");
+                                        }
                                         lastVerifierRejection = null;
                                         lastAimRect = null;
                                         recoveryEpisode = ConfirmPendingRecovery(recoveryEpisode, recoveryLessons, independentlyVerified);
@@ -701,8 +1489,9 @@
                                         runResult = new ControlRunResult(
                                             ControlRunOutcome.Completed,
                                             step,
-                                            verify?.Reason ??
-                                            "the model completion was verified");
+                                            independentlyVerified
+                                                ? verify?.Reason ?? "the model completion was independently verified"
+                                                : "model completion was accepted without independent verification");
                                         break;
                                     }
                                     else
@@ -714,25 +1503,31 @@
                                     }
                                 }
                             }
-                            else if (action.Type == "drag_drop")
+                            else if (action.Type is "drag_drop" or "drag_path")
                             {
-                                if (!HasExplicitPoint(action) || !HasExplicitDropPoint(action))
+                                if (action.Type == "drag_drop" &&
+                                    (!HasExplicitPoint(action) || !HasExplicitDropPoint(action)))
                                     throw new InvalidOperationException("drag_drop requires an explicit source and destination.");
+                                if (action.Type == "drag_path" &&
+                                    (action.Path is null || action.Path.Length < 2))
+                                    throw new InvalidOperationException("drag_path requires at least two path points.");
 
-                                var source = ResolvePoint(action);
+                                var source = action.Type == "drag_path"
+                                    ? ResolveGesturePath(action)[0]
+                                    : new Point(ResolvePoint(action).X, ResolvePoint(action).Y);
                                 if (lastAimRect is null && !DirectClickWithoutAim)
                                 {
-                                    Console.WriteLine("[guard] drag_drop blocked: no active source AIM. Return 'aim' for the source first.");
-                                    AddHistory(historyBuffer, $"[{step}] IGNORED (drag_without_aim)");
-                                    lastExecutorFailure = "drag_drop was blocked because its source had no active AIM";
+                                    Console.WriteLine($"[guard] {action.Type} blocked: no active source AIM. Return 'aim' for the source first.");
+                                    AddHistory(historyBuffer, $"[{step}] IGNORED (gesture_without_aim)");
+                                    lastExecutorFailure = $"{action.Type} was blocked because its source had no active AIM";
                                     actionExecutionFailed = true;
                                     actionWasLocallyRejected = true;
                                 }
                                 else if (lastAimRect is Rectangle dragAim && !dragAim.Contains(source.X, source.Y))
                                 {
-                                    Console.WriteLine("[guard] drag_drop source outside active AIM → ignoring. Set AIM around the source object.");
-                                    AddHistory(historyBuffer, $"[{step}] IGNORED (drag_source_outside_aim)");
-                                    lastExecutorFailure = "drag_drop was blocked because its source was outside the active AIM";
+                                    Console.WriteLine($"[guard] {action.Type} source outside active AIM → ignoring. Set AIM around the gesture start.");
+                                    AddHistory(historyBuffer, $"[{step}] IGNORED (gesture_source_outside_aim)");
+                                    lastExecutorFailure = $"{action.Type} was blocked because its source was outside the active AIM";
                                     actionExecutionFailed = true;
                                     actionWasLocallyRejected = true;
                                 }
@@ -743,11 +1538,57 @@
                                     actionExecuted = true;
                                 }
                             }
+                            else if (string.Equals(
+                                         currentActionPolicy,
+                                         "turn_based_interaction",
+                                         StringComparison.Ordinal) &&
+                                     actionBaselineFrame is not null &&
+                                     currentAction.ObservationRegion is Rectangle observedTurnRegion &&
+                                     TryTakeQueuedObservedTurnActions(
+                                         currentAction,
+                                         observedTurnRegion,
+                                         out var observedTurnActions))
+                            {
+                                var observedBatchResult =
+                                    await ExecuteObservedTurnActionSequenceAsync(
+                                        observedTurnActions,
+                                        actionBaselineFrame,
+                                        observedTurnRegion,
+                                        turnBasedTransitions,
+                                        turnBasedInteractionWindow,
+                                        cancelCts.Token);
+                                currentAction = observedBatchResult.ExecutedActions[^1];
+                                action = currentAction.Action;
+                                action.TurnSequenceObserved = true;
+                                turnBatchObserved = true;
+                                actionExecuted = true;
+                            }
                             else if (action.Type is "click" or "double_click")
                             {
-                                if (lastAimRect is null && DirectClickWithoutAim && HasExplicitPoint(action))
+                                var hasExplicitClickPoint = HasExplicitPoint(action);
+                                var explicitClickOutsideAim = false;
+                                if (hasExplicitClickPoint && lastAimRect is Rectangle activeAim)
                                 {
-                                    Console.WriteLine("[guard] direct click without AIM allowed by profile.");
+                                    var explicitPoint = ResolveClickPoint(
+                                        action,
+                                        activeAim,
+                                        logAdjustment: false);
+                                    explicitClickOutsideAim = !activeAim.Contains(
+                                        explicitPoint.X,
+                                        explicitPoint.Y);
+                                }
+
+                                if (DirectClickWithoutAim &&
+                                    hasExplicitClickPoint &&
+                                    (lastAimRect is null || explicitClickOutsideAim))
+                                {
+                                    if (explicitClickOutsideAim)
+                                    {
+                                        Console.WriteLine(
+                                            "[aim] superseded by a new explicit click target after the model revised its intended interaction.");
+                                        lastAimRect = null;
+                                    }
+                                    Console.WriteLine("[guard] direct explicit click allowed by profile.");
                                     ExecuteAction(action);
                                     actionExecuted = true;
                                 }
@@ -789,6 +1630,37 @@
                                         }
                                     }
                                 }
+                            }
+                            else if (string.Equals(
+                                         currentActionPolicy,
+                                         "turn_based_interaction",
+                                         StringComparison.Ordinal) &&
+                                     TryGetTurnBasedDirectionalSequenceLength(
+                                         action,
+                                         out var turnSequenceLength) &&
+                                     turnSequenceLength > 1)
+                            {
+                                if (actionBaselineFrame is null ||
+                                    currentAction.ObservationRegion is not Rectangle turnBatchRegion)
+                                {
+                                    throw new InvalidOperationException(
+                                        "turn-based sequence requires a current interaction baseline");
+                                }
+                                var turnBatchResult = await ExecuteTurnBasedDirectionalSequenceAsync(
+                                    action.Keys!,
+                                    actionBaselineFrame,
+                                    turnBatchRegion,
+                                    turnBasedTransitions,
+                                    turnBasedInteractionWindow,
+                                    cancelCts.Token);
+                                action.Keys = turnBatchResult.ExecutedKeys.ToArray();
+                                action.TurnSequenceObserved = true;
+                                currentAction = AttachTurnBasedObservationRegion(
+                                    CaptureResolvedAction(action, lastAimRect),
+                                    turnBasedInteractionRect,
+                                    currentActionPolicy);
+                                turnBatchObserved = true;
+                                actionExecuted = true;
                             }
                             else
                             {
@@ -843,6 +1715,17 @@
         
                         if (!actionExecutionFailed && actionExecuted)
                         {
+                            if (string.Equals(
+                                    currentActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal) &&
+                                IsStateChangingInteractionAction(currentAction.Action) &&
+                                turnReanalysisWasRequired)
+                            {
+                                turnBasedTransitions.AcknowledgeReanalysis();
+                                if (!turnBasedTransitions.HasActiveCausalEvent)
+                                    activeTurnChangeImages = [];
+                            }
                             consecutiveActionFailures = 0;
                             lastExecutorFailure = null;
                             AddHistory(historyBuffer, $"[{step}] {currentAction.Description}");
@@ -851,13 +1734,27 @@
                             if (action.Type != "done" && lastVerifierRejection != null)
                                 lastVerifierRejection = null;
 
+                            observationActionGuard.RecordExecuted(currentAction);
                             RecordRecoveryAction(recoveryEpisode, recentExecutedActions, currentAction, recoveryLessons);
 
-                            var batchResult = await ExecuteQueuedSafeActionsAsync(historyBuffer, step, cancelCts.Token);
+                            var batchResult = await ExecuteQueuedSafeActionsAsync(
+                                historyBuffer,
+                                step,
+                                action,
+                                (actionBaselineFrame ?? observationFrame).GlobalFingerprint,
+                                cancelCts.Token);
                             foreach (var batchedAction in batchResult.ExecutedActions)
                             {
+                                observationActionGuard.RecordExecuted(batchedAction);
                                 RecordRecoveryAction(recoveryEpisode, recentExecutedActions, batchedAction, recoveryLessons);
                                 currentAction = batchedAction;
+                            }
+                            if (batchResult.ExecutedActions.Count > 0)
+                            {
+                                currentActionPolicy = observationSession.ResolveActionPolicy(
+                                    currentAction,
+                                    promptContext,
+                                    goal);
                             }
                             if (!string.IsNullOrWhiteSpace(batchResult.Error))
                                 lastExecutorFailure = batchResult.Error;
@@ -865,10 +1762,18 @@
         
                         // Keep context for next step (delta/repeat metrics)
                         prevAction = actionExecutionFailed || !actionExecuted ? null : currentAction;
-                        prevShotFingerprint = actionExecutionFailed || !actionExecuted ? null : shotFingerprint;
+                        prevShotFingerprint = actionExecutionFailed || !actionExecuted
+                            ? null
+                            : (actionBaselineFrame ?? observationFrame).GlobalFingerprint;
                         prevActiveWindowFingerprint = actionExecutionFailed || !actionExecuted
                             ? null
-                            : activeWindowFingerprint;
+                            : (actionBaselineFrame ?? observationFrame).ActiveWindowFingerprint;
+                        prevObservationFrame = actionExecutionFailed || !actionExecuted
+                            ? null
+                            : actionBaselineFrame ?? observationFrame;
+                        prevObservationContext = actionExecutionFailed || !actionExecuted
+                            ? null
+                            : promptContext;
         
                         if (CancelRequested)
                         {
@@ -880,9 +1785,18 @@
                             break;
                         }
         
-                        if (!actionExecutionFailed && actionExecuted)
+                        if (!actionExecutionFailed && actionExecuted && !turnBatchObserved)
                         {
-                            try { await WaitAfterActionAsync(currentAction.Action, shotFingerprint, cancelCts.Token); }
+                            try
+                            {
+                                _ = await WaitAfterActionAsync(
+                                    currentAction.Action,
+                                    (actionBaselineFrame ?? observationFrame).GlobalFingerprint,
+                                    currentActionPolicy,
+                                    actionBaselineLocalFingerprint,
+                                    currentAction.ObservationRegion,
+                                    cancelCts.Token);
+                            }
                             catch (OperationCanceledException) when (CancelRequested)
                             {
                                 Console.WriteLine("Aborted (hotkey).");
@@ -914,11 +1828,13 @@
                 }
                 finally
                 {
+                    ReleaseAllHeldKeys();
                     cancelCts?.Cancel();
                     cancelCts?.Dispose();
                     _ = FlushPendingRecoveryMemory();
                     if (LoopReplayAutoExportEnabled && RecoveryMemoryEnabled)
                         TryAutoExportLoopReplayCorpus();
+                    controlContextChain?.LogClose(runResult.Outcome);
                     PrintRunMetrics();
                     Console.SetOut(prevOut);
                     Console.SetError(prevErr);
@@ -927,9 +1843,129 @@
                 }
                 return runResult with { Step = currentStep };
             }
+
+            internal sealed class ControlContextChain
+            {
+                readonly string chainId;
+                readonly int fallbackLimit;
+                int fallbackCount;
+                int compactionCount;
+
+                internal ControlContextChain(
+                    string commandId,
+                    bool enabled,
+                    bool compactionEnabled,
+                    int fallbackLimit)
+                {
+                    chainId = commandId.Length <= 8 ? commandId : commandId[..8];
+                    Enabled = enabled;
+                    CompactionEnabled = enabled && compactionEnabled;
+                    this.fallbackLimit = Math.Max(1, fallbackLimit);
+                }
+
+                internal bool Enabled { get; private set; }
+                internal bool CompactionEnabled { get; private set; }
+                internal string? PreviousResponseId { get; private set; }
+                internal string? PreviousResponseIdForRequest =>
+                    Enabled ? PreviousResponseId : null;
+                internal int TurnCount { get; private set; }
+                internal int RestartCount { get; private set; }
+
+                internal void LogStart(string model)
+                {
+                    if (!Enabled)
+                    {
+                        Console.WriteLine("[context] control chaining disabled; explicit application history will be used.");
+                        return;
+                    }
+
+                    var effectiveContext = SupportsReasoningContext(model)
+                        ? ControlReasoningContext
+                        : "model_default";
+                    var compaction = CompactionEnabled
+                        ? ControlContextCompactThreshold.ToString(CultureInfo.InvariantCulture)
+                        : "off";
+                    Console.WriteLine(
+                        $"[context] started control chain id={chainId}; reasoning_context={effectiveContext}; compact_threshold={compaction}.");
+                }
+
+                internal void LogRequest(int step)
+                {
+                    if (!Enabled)
+                        return;
+
+                    if (PreviousResponseId is null)
+                    {
+                        Console.WriteLine($"[context] chain={chainId}; step={step}; starting API turn without previous_response_id.");
+                        return;
+                    }
+
+                    Console.WriteLine(
+                        $"[context] chain={chainId}; step={step}; continuing turn={TurnCount + 1}; previous={ShortResponseId(PreviousResponseId)}.");
+                }
+
+                internal void RecordResult(
+                    string? completedResponseId,
+                    bool contextFallbackUsed,
+                    bool compactionFallbackUsed,
+                    bool compactionOccurred)
+                {
+                    if (compactionFallbackUsed && CompactionEnabled)
+                    {
+                        CompactionEnabled = false;
+                        Console.WriteLine(
+                            $"[context] chain={chainId}; server-side compaction disabled for the remainder of this task.");
+                    }
+
+                    if (contextFallbackUsed)
+                    {
+                        PreviousResponseId = null;
+                        fallbackCount++;
+                        RestartCount++;
+                        RunControlContextRestarts++;
+                        Console.WriteLine(
+                            $"[context] chain={chainId}; restarted from checkpoint; fallback={fallbackCount}/{fallbackLimit}.");
+                        if (fallbackCount >= fallbackLimit)
+                        {
+                            Enabled = false;
+                            CompactionEnabled = false;
+                            Console.WriteLine(
+                                $"[context] chain={chainId}; disabled after {fallbackCount} state failures; continuing with explicit application history.");
+                        }
+                    }
+
+                    if (compactionOccurred)
+                    {
+                        compactionCount++;
+                        Console.WriteLine(
+                            $"[context] chain={chainId}; server-side compaction completed; count={compactionCount}.");
+                    }
+
+                    if (!Enabled || string.IsNullOrWhiteSpace(completedResponseId))
+                        return;
+
+                    PreviousResponseId = completedResponseId;
+                    TurnCount++;
+                    RunControlContextTurns++;
+                    Console.WriteLine(
+                        $"[context] chain={chainId}; finalized turn={TurnCount}; response={ShortResponseId(completedResponseId)}.");
+                }
+
+                internal void LogClose(ControlRunOutcome outcome)
+                {
+                    if (!Enabled && TurnCount == 0 && RestartCount == 0)
+                        return;
+
+                    Console.WriteLine(
+                        $"[context] closed chain id={chainId}; outcome={outcome}; turns={TurnCount}; restarts={RestartCount}; compactions={compactionCount}.");
+                }
+
+                static string ShortResponseId(string responseId) =>
+                    responseId.Length <= 18 ? responseId : responseId[..18] + "...";
+            }
         
             internal static bool IsMouseAction(ActionDto a)
-                => a.Type is "move" or "click" or "double_click" or "drag_drop" or "scroll" or "focus_uia" or "click_uia";
+                => a.Type is "move" or "click" or "double_click" or "drag_drop" or "drag_path" or "scroll" or "focus_uia" or "click_uia";
         
             internal static bool IsPointClickAction(ActionDto? a)
                 => a?.Type is "click" or "double_click";
@@ -1014,9 +2050,2167 @@
         
                 return string.Join('\n', lines.Skip(lines.Length - maxLines)).Trim();
             }
+
+            internal static string BuildRecentActionCheckpoint(
+                IReadOnlyCollection<ResolvedActionSnapshot> recentActions)
+            {
+                if (recentActions.Count == 0)
+                    return "";
+
+                var actions = recentActions
+                    .TakeLast(12)
+                    .Select(action => TrimForMeta(action.Description, 160));
+                return "RECENT_EXECUTED_ACTIONS (oldest to newest): " +
+                       string.Join(" | ", actions);
+            }
         
             internal static bool IsLocalObservationAction(ActionDto a)
                 => a.Type is "aim" or "point" or "request_crop";
+
+            internal static bool IsInspectionAction(ActionDto a)
+                => a.Type is "point" or "request_crop";
+
+            internal static bool IsStateChangingInteractionAction(ActionDto a) =>
+                ActionNeedsEffectObservation(a) && a.Type != "wait";
+
+            internal static bool RequiresPrimaryTurnBasedRegion(ActionDto action)
+            {
+                if (!IsStateChangingInteractionAction(action) ||
+                    action.Type is "click" or "double_click")
+                {
+                    return false;
+                }
+
+                if (action.Type == "keys" && action.Keys is { Length: 1 })
+                {
+                    var key = action.Keys[0]?.Trim().ToLowerInvariant();
+                    if (key is "space" or "spacebar" or "enter" or "return")
+                        return false;
+                }
+
+                return true;
+            }
+
+            internal static bool TryGetTurnBasedDirectionalSequenceLength(
+                ActionDto action,
+                out int length)
+            {
+                length = action.Keys?.Length ?? 0;
+                if (action.Type != "keys" || length == 0)
+                    return false;
+
+                return action.Keys!.All(key =>
+                {
+                    var normalized = key?.Trim().ToLowerInvariant();
+                    return normalized is "arrowleft" or "left" or "arrowright" or "right" or
+                        "arrowup" or "up" or "arrowdown" or "down" or
+                        "w" or "a" or "s" or "d";
+                });
+            }
+
+            internal readonly record struct TurnBatchExecutionResult(
+                IReadOnlyList<string> ExecutedKeys,
+                bool Interrupted);
+
+            internal readonly record struct ObservedTurnBatchExecutionResult(
+                IReadOnlyList<ResolvedActionSnapshot> ExecutedActions,
+                bool Interrupted);
+
+            internal readonly record struct TurnNoEffectPolicy(
+                bool ExtendObservation,
+                bool ReplayInput);
+
+            internal static TurnNoEffectPolicy ResolveTurnNoEffectPolicy(
+                bool immediateReactionObserved) =>
+                immediateReactionObserved
+                    ? new TurnNoEffectPolicy(false, false)
+                    : new TurnNoEffectPolicy(true, false);
+
+            internal static bool TryTakeQueuedObservedTurnActions(
+                ResolvedActionSnapshot firstAction,
+                Rectangle region,
+                out IReadOnlyList<ResolvedActionSnapshot> actions)
+            {
+                actions = Array.Empty<ResolvedActionSnapshot>();
+                if (PendingSafeActions.Count == 0 ||
+                    firstAction.Action.PlannedInputs is not { Length: >= 2 } plannedInputs ||
+                    (firstAction.Action.PlanConfidence ?? firstAction.Action.Confidence ?? 0) <
+                        TurnBasedTransitionTracker.MinimumStructuredPlanConfidence ||
+                    !OpenAiResponsesService.TryBindObservedTurnActionToPlannedInput(
+                        firstAction.Action,
+                        plannedInputs[0]))
+                {
+                    return false;
+                }
+
+                var queued = PendingSafeActions.ToArray();
+                var accepted = new List<ResolvedActionSnapshot>(queued.Length + 1)
+                {
+                    firstAction with { ObservationRegion = ClampRect(region) }
+                };
+                for (var index = 0;
+                     index < queued.Length && index + 1 < plannedInputs.Length;
+                     index++)
+                {
+                    var candidate = queued[index];
+                    if (!OpenAiResponsesService.TryBindObservedTurnActionToPlannedInput(
+                            candidate,
+                            plannedInputs[index + 1]))
+                    {
+                        break;
+                    }
+
+                    var snapshot = CaptureResolvedAction(candidate, null) with
+                    {
+                        ObservationRegion = ClampRect(region)
+                    };
+                    if (!snapshot.IsValid)
+                        break;
+                    accepted.Add(snapshot);
+                }
+
+                if (accepted.Count <= 1)
+                    return false;
+
+                PendingSafeActions.Clear();
+                actions = accepted;
+                return true;
+            }
+
+            internal static async Task<ObservedTurnBatchExecutionResult> ExecuteObservedTurnActionSequenceAsync(
+                IReadOnlyList<ResolvedActionSnapshot> actions,
+                ScreenObservationFrame initialFrame,
+                Rectangle region,
+                TurnBasedTransitionTracker tracker,
+                IntPtr interactionWindow,
+                CancellationToken cancellationToken)
+            {
+                Console.WriteLine(
+                    $"[turn-batch] mode={tracker.ExecutionBatchMode}; modality=mixed_observed; executing={actions.Count}; observation_barrier=per_input");
+                var executed = new List<ResolvedActionSnapshot>(actions.Count);
+                var beforeFrame = initialFrame;
+                tracker.BeginBatch(initialFrame, region);
+                for (var index = 0; index < actions.Count; index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (interactionWindow != IntPtr.Zero &&
+                        GetForegroundWindow() != interactionWindow &&
+                        !TryRestoreForegroundWindow(interactionWindow))
+                    {
+                        Console.WriteLine(
+                            "[turn-focus] observed sequence interrupted because the interaction window could not regain focus.");
+                        return new ObservedTurnBatchExecutionResult(executed, true);
+                    }
+                    var snapshot = actions[index];
+                    var beforeLocal = CaptureRegionFingerprintProbe(region);
+                    ExecuteAction(snapshot.Action);
+                    var actionReactionObserved = await WaitAfterActionAsync(
+                        snapshot.Action,
+                        beforeFrame.GlobalFingerprint,
+                        "turn_based_interaction",
+                        beforeLocal,
+                        region,
+                        cancellationToken,
+                        tracker.PreferFastBatchSettle);
+                    var noEffectPolicy = ResolveTurnNoEffectPolicy(
+                        actionReactionObserved);
+                    if (noEffectPolicy.ExtendObservation)
+                    {
+                        Console.WriteLine(
+                            $"[turn-batch] input={index + 1}/{actions.Count}; no immediate reaction; extending observation without replaying the input.");
+                        actionReactionObserved = await WaitForLocalScreenReactionAndStableAsync(
+                            beforeLocal,
+                            region,
+                            snapshot.Action,
+                            cancellationToken,
+                            preferFastSettle: false);
+                    }
+                    var afterFrame = CaptureObservationFrameProbe(includeDetail: true);
+                    var assessment = tracker.RecordBatchActionStep(
+                        beforeFrame,
+                        afterFrame,
+                        region,
+                        snapshot,
+                        actionReactionObserved);
+                    beforeFrame = afterFrame;
+                    executed.Add(snapshot);
+                    Console.WriteLine(
+                        $"[turn-batch] input={index + 1}/{actions.Count}; attempts=1; action={snapshot.Description}; known_transition={assessment.KnownTransition.ToString().ToLowerInvariant()}; salient={assessment.SalientChange.ToString().ToLowerInvariant()}; {assessment.Summary}");
+                    if (assessment.NoEffect)
+                    {
+                        Console.WriteLine(
+                            "[turn-batch] observed sequence interrupted after extended no_effect confirmation; the input was not replayed and the route cursor was not advanced.");
+                        return new ObservedTurnBatchExecutionResult(executed, true);
+                    }
+                    if (index + 1 < actions.Count && !assessment.ContinueBatch)
+                    {
+                        Console.WriteLine(
+                            "[turn-batch] observed sequence interrupted before the next input; a fresh model decision is required.");
+                        return new ObservedTurnBatchExecutionResult(executed, true);
+                    }
+                }
+
+                return new ObservedTurnBatchExecutionResult(executed, false);
+            }
+
+            internal static async Task<TurnBatchExecutionResult> ExecuteTurnBasedDirectionalSequenceAsync(
+                IReadOnlyList<string> keys,
+                ScreenObservationFrame initialFrame,
+                Rectangle region,
+                TurnBasedTransitionTracker tracker,
+                IntPtr interactionWindow,
+                CancellationToken cancellationToken)
+            {
+                Console.WriteLine(
+                    $"[turn-batch] mode={tracker.ExecutionBatchMode}; advertised_cap={tracker.AdvertisedMaxExecutionBatchLength}; accepted_cap={tracker.MaxExecutionBatchLength}; executing={keys.Count}; observation_barrier=per_input");
+                var executed = new List<string>(keys.Count);
+                var beforeFrame = initialFrame;
+                tracker.BeginBatch(initialFrame, region);
+                for (var index = 0; index < keys.Count; index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (interactionWindow != IntPtr.Zero &&
+                        GetForegroundWindow() != interactionWindow &&
+                        !TryRestoreForegroundWindow(interactionWindow))
+                    {
+                        Console.WriteLine(
+                            "[turn-focus] key sequence interrupted because the interaction window could not regain focus.");
+                        return new TurnBatchExecutionResult(executed, true);
+                    }
+                    var key = keys[index];
+                    var stepAction = new ActionDto
+                    {
+                        Type = "keys",
+                        Keys = [key]
+                    };
+                    var beforeLocal = CaptureRegionFingerprintProbe(region);
+                    PressKey(key);
+                    var actionReactionObserved = await WaitAfterActionAsync(
+                        stepAction,
+                        beforeFrame.GlobalFingerprint,
+                        "turn_based_interaction",
+                        beforeLocal,
+                        region,
+                        cancellationToken,
+                        tracker.PreferFastBatchSettle);
+                    var noEffectPolicy = ResolveTurnNoEffectPolicy(
+                        actionReactionObserved);
+                    if (noEffectPolicy.ExtendObservation)
+                    {
+                        Console.WriteLine(
+                            $"[turn-batch] input={index + 1}/{keys.Count}; no immediate reaction; extending observation without replaying the key.");
+                        actionReactionObserved = await WaitForLocalScreenReactionAndStableAsync(
+                            beforeLocal,
+                            region,
+                            stepAction,
+                            cancellationToken,
+                            preferFastSettle: false);
+                    }
+                    var afterFrame = CaptureObservationFrameProbe(includeDetail: true);
+                    var assessment = tracker.RecordBatchStep(
+                        beforeFrame,
+                        afterFrame,
+                        region,
+                        key,
+                        actionReactionObserved);
+                    beforeFrame = afterFrame;
+                    executed.Add(key);
+                    Console.WriteLine(
+                        $"[turn-batch] input={index + 1}/{keys.Count}; attempts=1; known_transition={assessment.KnownTransition.ToString().ToLowerInvariant()}; salient={assessment.SalientChange.ToString().ToLowerInvariant()}; {assessment.Summary}");
+                    if (assessment.NoEffect)
+                    {
+                        Console.WriteLine(
+                            "[turn-batch] sequence interrupted after extended no_effect confirmation; the key was not replayed and the route cursor was not advanced.");
+                        return new TurnBatchExecutionResult(executed, true);
+                    }
+                    if (index + 1 < keys.Count && !assessment.ContinueBatch)
+                    {
+                        Console.WriteLine(
+                            "[turn-batch] sequence interrupted before the next input; a fresh model decision is required.");
+                        return new TurnBatchExecutionResult(executed, true);
+                    }
+                }
+                return new TurnBatchExecutionResult(executed, false);
+            }
+
+            internal sealed class ObservationActionGuardState
+            {
+                readonly HashSet<string> inspectionSignatures = new(StringComparer.Ordinal);
+
+                internal int ConsecutiveInspectionActions { get; private set; }
+                internal bool AimIssuedSinceInteraction { get; private set; }
+
+                internal bool RequiresInteraction(int maxConsecutiveInspectionActions) =>
+                    maxConsecutiveInspectionActions > 0 &&
+                    ConsecutiveInspectionActions >= maxConsecutiveInspectionActions;
+
+                internal bool TryGetBlockReason(
+                    ResolvedActionSnapshot action,
+                    int maxConsecutiveInspectionActions,
+                    out string reason)
+                {
+                    reason = "";
+                    if (IsInspectionAction(action.Action))
+                    {
+                        if (AimIssuedSinceInteraction)
+                        {
+                            reason = "an AIM is already active; interact with that target instead of requesting another inspection";
+                            return true;
+                        }
+
+                        var signature = InspectionSignature(action.Action);
+                        if (inspectionSignatures.Contains(signature))
+                        {
+                            reason = "the requested inspection revisits an area already inspected since the last interaction; choose a state-changing action";
+                            return true;
+                        }
+
+                        if (RequiresInteraction(maxConsecutiveInspectionActions))
+                        {
+                            reason = $"the limit of {maxConsecutiveInspectionActions} consecutive crop/point inspections was reached; perform one safe state-changing interaction before inspecting again";
+                            return true;
+                        }
+                    }
+                    else if (action.Action.Type == "aim" && AimIssuedSinceInteraction)
+                    {
+                        reason = "an AIM is already active; click or perform the intended gesture instead of aiming again";
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                internal void RecordExecuted(ResolvedActionSnapshot action)
+                {
+                    if (IsInspectionAction(action.Action))
+                    {
+                        inspectionSignatures.Add(InspectionSignature(action.Action));
+                        ConsecutiveInspectionActions++;
+                        return;
+                    }
+
+                    if (action.Action.Type == "aim")
+                    {
+                        AimIssuedSinceInteraction = true;
+                        return;
+                    }
+
+                    if (IsStateChangingInteractionAction(action.Action))
+                        Reset();
+                }
+
+                internal void Reset()
+                {
+                    inspectionSignatures.Clear();
+                    ConsecutiveInspectionActions = 0;
+                    AimIssuedSinceInteraction = false;
+                }
+
+                static string InspectionSignature(ActionDto action)
+                {
+                    var rect = ResolveCropRect(action);
+                    if (rect is not Rectangle region)
+                        return IneffectiveActionSignature(action);
+
+                    const int quantum = 16;
+                    return $"{action.Type}:{region.Left / quantum},{region.Top / quantum},{region.Width / quantum},{region.Height / quantum}";
+                }
+            }
+
+            internal sealed class ShortTermPlanTracker
+            {
+                string? plan;
+                string status = "none";
+                string? revisionReason;
+                string[] plannedInputs = [];
+                string? waypoint;
+                string? originStateId;
+                string? expectedStateId;
+                double? planConfidence;
+                int currentInputIndex;
+
+                internal bool HasActivePlan =>
+                    plan is not null && status == "active";
+
+                internal bool HasExecutableDirectionalPlan =>
+                    HasActivePlan && currentInputIndex < plannedInputs.Length;
+
+                internal string Status => status;
+
+                internal int RemainingInputCount =>
+                    Math.Max(0, plannedInputs.Length - currentInputIndex);
+
+                internal double EffectiveConfidence => planConfidence ?? 0;
+
+                internal void Update(ActionDto action, string? currentStateId = null)
+                {
+                    var requestedStatus = action.PlanStatus?.Trim().ToLowerInvariant();
+                    if (string.IsNullOrWhiteSpace(requestedStatus))
+                        return;
+
+                    if (requestedStatus == "none")
+                    {
+                        if (plan is not null || status != "none")
+                            Console.WriteLine("[plan] cleared.");
+                        plan = null;
+                        status = "none";
+                        revisionReason = null;
+                        plannedInputs = [];
+                        waypoint = null;
+                        originStateId = null;
+                        expectedStateId = null;
+                        planConfidence = null;
+                        currentInputIndex = 0;
+                        return;
+                    }
+
+                    var nextPlan = NormalizePlanText(action.ShortTermPlan, 420);
+                    if (nextPlan is null)
+                    {
+                        Invalidate("the model marked a plan active without supplying its steps");
+                        return;
+                    }
+
+                    var nextReason = NormalizePlanText(action.PlanRevisionReason, 200);
+                    var nextInputs = NormalizePlannedInputs(action.PlannedInputs);
+                    var nextWaypoint = NormalizePlanText(action.PlanWaypoint, 160);
+                    var revised = requestedStatus == "revised";
+                    var hasStructuredIdentity =
+                        plannedInputs.Length > 0 || nextInputs.Length > 0;
+                    var changed = hasStructuredIdentity
+                        ? !plannedInputs.SequenceEqual(
+                              nextInputs,
+                              StringComparer.Ordinal) ||
+                          !string.Equals(
+                              waypoint,
+                              nextWaypoint,
+                              StringComparison.Ordinal)
+                        : !string.Equals(plan, nextPlan, StringComparison.Ordinal);
+                    var preserveProgress = HasActivePlan && !revised && !changed;
+                    plan = nextPlan;
+                    status = "active";
+                    revisionReason = revised ? nextReason : null;
+                    planConfidence = action.PlanConfidence ?? action.Confidence ?? planConfidence;
+                    if (!preserveProgress)
+                    {
+                        plannedInputs = nextInputs;
+                        waypoint = nextWaypoint;
+                        currentInputIndex = 0;
+                        originStateId = currentStateId;
+                        expectedStateId = currentStateId;
+                        var requestedStateId = NormalizePlanText(action.PlanStateId, 32);
+                        if (requestedStateId is not null &&
+                            currentStateId is not null &&
+                            !string.Equals(
+                                requestedStateId,
+                                currentStateId,
+                                StringComparison.Ordinal))
+                        {
+                            Invalidate(
+                                $"the proposed route was bound to stale state {requestedStateId}, current state is {currentStateId}");
+                            return;
+                        }
+                    }
+                    if (changed || revised)
+                    {
+                        Console.WriteLine(
+                            revised
+                                ? $"[plan] revised: {plan}; reason={revisionReason ?? "new evidence"}"
+                                : $"[plan] active: {plan}");
+                        if (plannedInputs.Length > 0)
+                        {
+                            Console.WriteLine(
+                                $"[turn-plan] state={originStateId ?? "unknown"}; waypoint={waypoint ?? "unspecified"}; confidence={(planConfidence is double confidence ? confidence.ToString("0.00") : "n/a")}; inputs=[{string.Join(",", plannedInputs)}]");
+                        }
+                    }
+                }
+
+                internal bool ProposedSequenceMatches(
+                    IReadOnlyList<string> proposedInputs,
+                    string? currentStateId,
+                    out string reason)
+                {
+                    reason = "";
+                    if (!HasExecutableDirectionalPlan)
+                        return true;
+                    if (expectedStateId is not null &&
+                        currentStateId is not null &&
+                        !string.Equals(expectedStateId, currentStateId, StringComparison.Ordinal))
+                    {
+                        reason =
+                            $"structured route expects state {expectedStateId}, current state is {currentStateId}";
+                        return false;
+                    }
+
+                    var normalized = proposedInputs
+                        .Select(NormalizePlannedInput)
+                        .ToArray();
+                    if (normalized.Any(input => input is null))
+                    {
+                        reason = "structured route contains a non-directional input";
+                        return false;
+                    }
+                    var remaining = plannedInputs.Skip(currentInputIndex).ToArray();
+                    if (normalized.Length > remaining.Length ||
+                        !normalized.Select(input => input!).SequenceEqual(
+                            remaining.Take(normalized.Length),
+                            StringComparer.Ordinal))
+                    {
+                        reason =
+                            $"proposed inputs do not match remaining structured route [{string.Join(",", remaining)}]";
+                        return false;
+                    }
+                    return true;
+                }
+
+                internal bool TryExpandDirectionalSequence(
+                    IReadOnlyList<string> proposedInputs,
+                    string? currentStateId,
+                    int maximumLength,
+                    out string[] expandedInputs)
+                {
+                    expandedInputs = proposedInputs.ToArray();
+                    if (!HasExecutableDirectionalPlan ||
+                        EffectiveConfidence < TurnBasedTransitionTracker.MinimumStructuredPlanConfidence ||
+                        maximumLength < 2 ||
+                        !ProposedSequenceMatches(
+                            proposedInputs,
+                            currentStateId,
+                            out _))
+                    {
+                        return false;
+                    }
+
+                    var remaining = plannedInputs
+                        .Skip(currentInputIndex)
+                        .Take(maximumLength)
+                        .ToArray();
+                    if (remaining.Length <= proposedInputs.Count)
+                        return false;
+                    expandedInputs = remaining;
+                    return true;
+                }
+
+                internal bool IsExpectedInput(string input, string? currentStateId)
+                {
+                    if (!HasExecutableDirectionalPlan)
+                        return false;
+                    var normalized = NormalizePlannedInput(input);
+                    return normalized is not null &&
+                           string.Equals(
+                               plannedInputs[currentInputIndex],
+                               normalized,
+                               StringComparison.Ordinal) &&
+                           (expectedStateId is null || currentStateId is null ||
+                            string.Equals(
+                                expectedStateId,
+                                currentStateId,
+                                StringComparison.Ordinal));
+                }
+
+                internal void RecordDirectionalResult(
+                    string input,
+                    string beforeState,
+                    string afterState,
+                    bool changed)
+                {
+                    if (!HasExecutableDirectionalPlan)
+                        return;
+                    if (!IsExpectedInput(input, beforeState))
+                    {
+                        Invalidate("the executed directional input diverged from the structured route");
+                        return;
+                    }
+                    if (!changed)
+                    {
+                        Invalidate("a structured route input was blocked or had no effect");
+                        return;
+                    }
+
+                    currentInputIndex++;
+                    expectedStateId = afterState;
+                    if (currentInputIndex >= plannedInputs.Length)
+                    {
+                        status = "completed";
+                        revisionReason = "the concrete route prefix reached its waypoint";
+                        Console.WriteLine(
+                            $"[turn-plan] completed {currentInputIndex}/{plannedInputs.Length} input(s); waypoint={waypoint ?? "unspecified"}.");
+                        return;
+                    }
+                    Console.WriteLine(
+                        $"[turn-plan] advanced to {currentInputIndex}/{plannedInputs.Length}; remaining=[{string.Join(",", plannedInputs.Skip(currentInputIndex))}]");
+                }
+
+                internal void Invalidate(string reason)
+                {
+                    if (!HasActivePlan)
+                        return;
+                    status = "invalidated";
+                    revisionReason = NormalizePlanText(reason, 200);
+                    Console.WriteLine(
+                        $"[plan] invalidated: {revisionReason ?? "observed state contradicted the plan"}");
+                }
+
+                internal string BuildPromptSummary()
+                {
+                    if (plan is null || status == "none")
+                        return "";
+                    var builder = new StringBuilder()
+                        .AppendLine($"SHORT_TERM_PLAN_STATUS: {status}")
+                        .AppendLine($"SHORT_TERM_PLAN: {plan}");
+                    if (plannedInputs.Length > 0)
+                    {
+                        builder
+                            .AppendLine($"PLAN_STATE_ID: {originStateId ?? "unknown"}")
+                            .AppendLine($"PLAN_EXPECTED_STATE_ID: {expectedStateId ?? "unknown"}")
+                            .AppendLine($"PLAN_WAYPOINT: {waypoint ?? "unspecified"}")
+                            .AppendLine($"PLAN_CONFIDENCE: {(planConfidence is double confidence ? confidence.ToString("0.00") : "N/A")}")
+                            .AppendLine($"CURRENT_PLAN_INDEX: {currentInputIndex}/{plannedInputs.Length}")
+                            .AppendLine($"PLANNED_INPUTS: [{string.Join(",", plannedInputs)}]")
+                            .AppendLine($"REMAINING_PLANNED_INPUTS: [{string.Join(",", plannedInputs.Skip(currentInputIndex))}]");
+                    }
+                    if (!string.IsNullOrWhiteSpace(revisionReason))
+                        builder.Append($"SHORT_TERM_PLAN_REVISION_REASON: {revisionReason}");
+                    return builder.ToString();
+                }
+
+                static string[] NormalizePlannedInputs(string[]? values) =>
+                    values?
+                        .Select(NormalizePlannedInput)
+                        .Where(value => value is not null)
+                        .Select(value => value!)
+                        .Take(12)
+                        .ToArray() ?? [];
+
+                static string? NormalizePlannedInput(string? value) =>
+                    value?.Trim().ToLowerInvariant() switch
+                    {
+                        "arrowup" or "up" => "ArrowUp",
+                        "arrowdown" or "down" => "ArrowDown",
+                        "arrowleft" or "left" => "ArrowLeft",
+                        "arrowright" or "right" => "ArrowRight",
+                        "w" => "W",
+                        "a" => "A",
+                        "s" => "S",
+                        "d" => "D",
+                        _ => null
+                    };
+
+                static string? NormalizePlanText(string? value, int maxChars)
+                {
+                    if (string.IsNullOrWhiteSpace(value))
+                        return null;
+                    return TrimForMeta(value.Trim(), maxChars);
+                }
+            }
+
+            internal sealed class TurnBasedTransitionTracker
+            {
+                const int StateFingerprintSide = 64;
+                const double StateMatchMeanThreshold = 0.004;
+                const double StateMatchChangedRatioThreshold = 0.0025;
+                const double ExternalChangeMeanThreshold = 0.006;
+                const double ExternalChangeRatioThreshold = 0.006;
+                const double CoherentExternalChangeMeanThreshold = 0.003;
+                const double CoherentExternalChangeRatioThreshold = 0.02;
+                internal const double MinimumStructuredPlanConfidence = 0.55;
+                const int ChangeTileSide = 4;
+                const int RecurrentRegionLimit = 18;
+                const int RecurrentRegionMaxAge = 12;
+
+                sealed class StatePrototype(string id, byte[] fingerprint)
+                {
+                    internal string Id { get; } = id;
+                    internal byte[] Fingerprint { get; set; } = fingerprint;
+                }
+
+                readonly record struct TurnTransition(
+                    string From,
+                    string Action,
+                    string To,
+                    string Result);
+
+                readonly record struct ChangeRegion(
+                    int Left,
+                    int Top,
+                    int Right,
+                    int Bottom,
+                    int ChangedPixels);
+
+                readonly record struct ChangeAnalysis(
+                    double MeanDelta,
+                    double ChangedRatio,
+                    IReadOnlyList<ChangeRegion> Regions,
+                    IReadOnlyList<ChangeRegion> NovelRegions,
+                    int PredictableRegionCount,
+                    bool HasDistantRegions,
+                    bool HasCausalDistantChange,
+                    bool IsBroad)
+                {
+                    internal bool IsSalient => HasDistantRegions || IsBroad;
+                    internal bool RequiresImmediateReanalysis =>
+                        IsBroad || HasCausalDistantChange;
+                }
+
+                sealed class RecurrentChangeRegion(
+                    ChangeRegion bounds,
+                    int lastSeenTransition)
+                {
+                    internal ChangeRegion Bounds { get; set; } = bounds;
+                    internal int Hits { get; set; } = 1;
+                    internal int LastSeenTransition { get; set; } = lastSeenTransition;
+                }
+
+                sealed class CausalEventEvidence(
+                    string baselineState,
+                    string triggerAction,
+                    string changedState,
+                    string changeSummary)
+                {
+                    internal string BaselineState { get; } = baselineState;
+                    internal string TriggerAction { get; } = triggerAction;
+                    internal string ChangedState { get; } = changedState;
+                    internal string ChangeSummary { get; } = changeSummary;
+                    internal int TransitionAge { get; set; }
+                    internal bool ReturnObserved { get; set; }
+                    internal string? ReturnAction { get; set; }
+                    internal bool ReenactmentObserved { get; set; }
+                    internal string? ReenactmentAction { get; set; }
+                }
+
+                internal readonly record struct BaselineAssessment(
+                    bool ExternalStateChange,
+                    string Summary);
+
+                internal readonly record struct BatchStepAssessment(
+                    bool ContinueBatch,
+                    bool KnownTransition,
+                    bool SalientChange,
+                    bool NoEffect,
+                    string Summary);
+
+                readonly List<StatePrototype> states = [];
+                readonly Queue<TurnTransition> transitions = new();
+                readonly HashSet<string> observedDirectionalInputs = new(StringComparer.Ordinal);
+                readonly Queue<double> ordinaryTransitionRatios = new();
+                readonly List<RecurrentChangeRegion> recurrentActionRegions = [];
+                readonly Queue<string> mechanicsHypothesisHistory = new();
+                readonly Dictionary<string, ActionDto> directionalClickTemplates = new(
+                    StringComparer.Ordinal);
+                readonly ShortTermPlanTracker shortTermPlan;
+                bool[] volatilePixels = [];
+                string? currentStateId;
+                string? lastChangeSummary;
+                string? worldStateSummary;
+                string? mechanicsHypothesis;
+                string? salientChangeObservation;
+                IReadOnlyList<RectangleF> salientChangeRegions = [];
+                int nextStateNumber = 1;
+                int actionTransitionNumber;
+                bool actionBaselineCalibrated;
+                byte[]? batchOriginFingerprint;
+                int consecutiveBatchNoEffect;
+                CausalEventEvidence? causalEvent;
+
+                internal bool RequiresReanalysis { get; private set; }
+                internal IReadOnlyList<RectangleF> SalientChangeRegions =>
+                    salientChangeRegions;
+                internal string? CurrentStateId => currentStateId;
+                internal bool HasActiveCausalEvent => causalEvent is not null;
+                internal bool PreferFastBatchSettle =>
+                    HasRecentSuccessfulDirectionalEvidence(1);
+
+                internal TurnBasedTransitionTracker(
+                    ShortTermPlanTracker? shortTermPlan = null)
+                {
+                    this.shortTermPlan = shortTermPlan ?? new ShortTermPlanTracker();
+                }
+
+                internal bool CanUseExecutionBatch =>
+                    CanProposeExecutionBatch &&
+                    (HasHighConfidenceStructuredPlan ||
+                     HasDirectionalExecutionEvidence);
+
+                internal bool CanProposeExecutionBatch =>
+                    states.Count >= 1 &&
+                    !RequiresReanalysis;
+
+                bool HasHighConfidenceStructuredPlan =>
+                    shortTermPlan.HasExecutableDirectionalPlan &&
+                    shortTermPlan.EffectiveConfidence >= MinimumStructuredPlanConfidence;
+
+                bool HasDirectionalExecutionEvidence =>
+                    transitions.Count >= 4 &&
+                    observedDirectionalInputs.Count >= 2 ||
+                    HasPredictableDirectionalRun() ||
+                    HasPlanBackedDirectionalEvidence();
+
+                int TransitionMemoryLimit =>
+                    Math.Max(12, TurnBasedMaxBatchInputs);
+
+                internal int AdvertisedMaxExecutionBatchLength =>
+                    TurnBasedMaxBatchInputs;
+
+                internal int MaxExecutionBatchLength =>
+                    CanUseExecutionBatch ? TurnBasedMaxBatchInputs : 0;
+
+                internal int PreferredAdvertisedExecutionBatchMinimum =>
+                    Math.Min(6, AdvertisedMaxExecutionBatchLength);
+
+                internal string ExecutionBatchMode =>
+                    HasRecentSuccessfulDirectionalEvidence(4)
+                        ? "mature_progressive"
+                        : HasRecentSuccessfulDirectionalEvidence(1)
+                            ? "progressive"
+                            : "aggressive_immediate";
+
+                internal void Reset()
+                {
+                    states.Clear();
+                    transitions.Clear();
+                    observedDirectionalInputs.Clear();
+                    ordinaryTransitionRatios.Clear();
+                    recurrentActionRegions.Clear();
+                    mechanicsHypothesisHistory.Clear();
+                    volatilePixels = [];
+                    currentStateId = null;
+                    lastChangeSummary = null;
+                    worldStateSummary = null;
+                    mechanicsHypothesis = null;
+                    salientChangeObservation = null;
+                    salientChangeRegions = [];
+                    RequiresReanalysis = false;
+                    shortTermPlan.Invalidate("the foreground interaction context changed");
+                    nextStateNumber = 1;
+                    actionTransitionNumber = 0;
+                    actionBaselineCalibrated = false;
+                    batchOriginFingerprint = null;
+                    consecutiveBatchNoEffect = 0;
+                    causalEvent = null;
+                }
+
+                internal void BeginExternalStateEpoch()
+                {
+                    var current = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, currentStateId, StringComparison.Ordinal));
+                    states.Clear();
+                    if (current is not null)
+                        states.Add(current);
+                    transitions.Clear();
+                    observedDirectionalInputs.Clear();
+                    ordinaryTransitionRatios.Clear();
+                    recurrentActionRegions.Clear();
+                    mechanicsHypothesisHistory.Clear();
+                    directionalClickTemplates.Clear();
+                    volatilePixels = [];
+                    worldStateSummary = null;
+                    mechanicsHypothesis = null;
+                    salientChangeObservation = null;
+                    actionBaselineCalibrated = true;
+                    batchOriginFingerprint = null;
+                    consecutiveBatchNoEffect = 0;
+                    causalEvent = null;
+                }
+
+                internal void BeginBatch(
+                    ScreenObservationFrame frame,
+                    Rectangle region)
+                {
+                    batchOriginFingerprint = ExtractRegionFingerprint(frame, region);
+                    consecutiveBatchNoEffect = 0;
+                }
+
+                internal void ObserveState(
+                    ScreenObservationFrame frame,
+                    Rectangle region)
+                {
+                    var fingerprint = ExtractRegionFingerprint(frame, region);
+                    if (fingerprint.Length == 0)
+                        return;
+
+                    EnsureVolatileMask(fingerprint.Length);
+                    if (currentStateId is null)
+                    {
+                        currentStateId = ResolveState(fingerprint, out _);
+                        actionBaselineCalibrated = false;
+                        Console.WriteLine(
+                            $"[turn] primary state established; immediate structured batching is available up to {AdvertisedMaxExecutionBatchLength} inputs.");
+                        return;
+                    }
+
+                    var current = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, currentStateId, StringComparison.Ordinal));
+                    if (current is null)
+                    {
+                        currentStateId = ResolveState(fingerprint, out _);
+                        return;
+                    }
+
+                    LearnAmbientPixels(current.Fingerprint, fingerprint);
+                    current.Fingerprint = fingerprint;
+                    actionBaselineCalibrated = true;
+                }
+
+                internal BaselineAssessment PrepareActionBaseline(
+                    ScreenObservationFrame frame,
+                    Rectangle region)
+                {
+                    var fingerprint = ExtractRegionFingerprint(frame, region);
+                    if (fingerprint.Length == 0 || currentStateId is null)
+                    {
+                        ObserveState(frame, region);
+                        return new BaselineAssessment(false, "stable");
+                    }
+
+                    EnsureVolatileMask(fingerprint.Length);
+                    var current = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, currentStateId, StringComparison.Ordinal));
+                    if (current is null)
+                    {
+                        currentStateId = ResolveState(fingerprint, out _);
+                        return new BaselineAssessment(false, "stable");
+                    }
+
+                    var earlierFingerprint = current.Fingerprint;
+                    var difference = StateDifference(earlierFingerprint, fingerprint);
+                    var analysis = AnalyzeChanges(
+                        earlierFingerprint,
+                        fingerprint,
+                        learnActionPatterns: false);
+                    var aggregateChange =
+                        difference.MeanDelta >= ExternalChangeMeanThreshold &&
+                        difference.ChangedRatio >= ExternalChangeRatioThreshold;
+                    var coherentChange =
+                        analysis.Regions.Count > 0 &&
+                        difference.MeanDelta >= CoherentExternalChangeMeanThreshold &&
+                        difference.ChangedRatio >= CoherentExternalChangeRatioThreshold;
+                    var coldStartCosmeticDrift =
+                        !actionBaselineCalibrated &&
+                        difference.MeanDelta < ExternalChangeMeanThreshold &&
+                        !analysis.IsSalient;
+                    var peripheralOnlyChange =
+                        IsPeripheralOnlyChange(analysis.Regions);
+                    var externalStateChange =
+                        !coldStartCosmeticDrift &&
+                        !peripheralOnlyChange &&
+                        (aggregateChange || coherentChange || analysis.IsSalient);
+                    if (!externalStateChange)
+                    {
+                        LearnAmbientPixels(earlierFingerprint, fingerprint);
+                        current.Fingerprint = fingerprint;
+                        actionBaselineCalibrated = true;
+                        salientChangeRegions = [];
+                        var classification = coldStartCosmeticDrift
+                            ? "cold_start_ambient_calibration"
+                            : peripheralOnlyChange
+                                ? "peripheral_window_chrome"
+                            : analysis.Regions.Count == 0
+                                ? "dispersed_ambient_drift"
+                                : "stable_or_ambient";
+                        return new BaselineAssessment(
+                            false,
+                            $"{classification}; {FormatChangeAnalysis(analysis)}");
+                    }
+
+                    var previousState = currentStateId;
+                    SetSalientChangeRegions(analysis);
+                    currentStateId = ResolveState(fingerprint, out _);
+                    var rebased = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, currentStateId, StringComparison.Ordinal));
+                    if (rebased is not null)
+                        rebased.Fingerprint = fingerprint;
+                    actionBaselineCalibrated = true;
+                    lastChangeSummary =
+                        $"external state change while awaiting the model: {previousState}->{currentStateId}; {FormatChangeAnalysis(analysis)}";
+                    RequiresReanalysis = true;
+                    shortTermPlan.Invalidate("the interaction state changed while the model was planning");
+                    return new BaselineAssessment(true, lastChangeSummary);
+                }
+
+                internal void RecordTransition(
+                    ScreenObservationFrame before,
+                    ScreenObservationFrame after,
+                    Rectangle region,
+                    ResolvedActionSnapshot action,
+                    ObservationAssessment assessment)
+                {
+                    var wasExecutionReady = CanUseExecutionBatch;
+                    var beforeFingerprint = ExtractRegionFingerprint(before, region);
+                    var afterFingerprint = ExtractRegionFingerprint(after, region);
+                    if (beforeFingerprint.Length == 0 || afterFingerprint.Length == 0)
+                        return;
+
+                    EnsureVolatileMask(beforeFingerprint.Length);
+                    var beforeState = currentStateId ?? ResolveState(beforeFingerprint, out _);
+                    var beforePrototype = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, beforeState, StringComparison.Ordinal));
+                    if (beforePrototype is not null)
+                        beforePrototype.Fingerprint = beforeFingerprint;
+                    var actionLabel = TurnActionLabel(action);
+                    var changeAnalysis = AnalyzeChanges(
+                        beforeFingerprint,
+                        afterFingerprint,
+                        learnActionPatterns: true);
+                    var persistentVisualChange =
+                        HasPersistentVisualChange(changeAnalysis);
+                    string afterState;
+                    string result;
+                    if (assessment.ActionOutcome == ActionOutcomeState.NoEffect ||
+                        !persistentVisualChange)
+                    {
+                        afterState = beforeState;
+                        result = "no_effect";
+                    }
+                    else if (assessment.ActionOutcome == ActionOutcomeState.Confirmed ||
+                             assessment.VisualChange == VisualChangeState.Changed)
+                    {
+                        afterState = ResolveActionState(
+                            afterFingerprint,
+                            beforeState,
+                            actionLabel,
+                            changeAnalysis);
+                        result = "changed";
+                    }
+                    else
+                    {
+                        var difference = StateDifference(beforeFingerprint, afterFingerprint);
+                        afterState = IsSameState(difference)
+                            ? beforeState
+                            : ResolveState(afterFingerprint, out _);
+                        result = "uncertain";
+                    }
+
+                    currentStateId = afterState;
+                    var afterPrototype = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, afterState, StringComparison.Ordinal));
+                    if (afterPrototype is not null)
+                        afterPrototype.Fingerprint = afterFingerprint;
+                    RememberDirectionalClickTemplate(action.Action, actionLabel);
+                    var planExpectedAction =
+                        shortTermPlan.IsExpectedInput(actionLabel, beforeState);
+                    if (IsCanonicalDirectionalInput(actionLabel))
+                        observedDirectionalInputs.Add(actionLabel);
+                    transitions.Enqueue(new TurnTransition(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        result));
+                    while (transitions.Count > TransitionMemoryLimit)
+                        transitions.Dequeue();
+                    RecordChangeEvidence(beforeState, actionLabel, afterState, changeAnalysis);
+                    if (result == "no_effect")
+                        shortTermPlan.Invalidate("a planned directional input had no effect");
+                    else if (changeAnalysis.RequiresImmediateReanalysis)
+                        shortTermPlan.Invalidate("a planned input caused a novel or broad state change");
+                    else if (planExpectedAction && IsCanonicalDirectionalInput(actionLabel))
+                    {
+                        shortTermPlan.RecordDirectionalResult(
+                            actionLabel,
+                            beforeState,
+                            afterState,
+                            result == "changed");
+                    }
+                    if (!wasExecutionReady && CanUseExecutionBatch)
+                    {
+                        Console.WriteLine(
+                            "[turn] phase exploration -> execution_ready; bounded ordered key sequences are now allowed.");
+                    }
+                }
+
+                internal BatchStepAssessment RecordBatchStep(
+                    ScreenObservationFrame before,
+                    ScreenObservationFrame after,
+                    Rectangle region,
+                    string key,
+                    bool actionReactionObserved = false) =>
+                    RecordBatchStepCore(
+                        before,
+                        after,
+                        region,
+                        CanonicalKeyLabel(key),
+                        actionReactionObserved);
+
+                internal BatchStepAssessment RecordBatchActionStep(
+                    ScreenObservationFrame before,
+                    ScreenObservationFrame after,
+                    Rectangle region,
+                    ResolvedActionSnapshot action,
+                    bool actionReactionObserved)
+                {
+                    var actionLabel = TurnActionLabel(action);
+                    RememberDirectionalClickTemplate(action.Action, actionLabel);
+                    return RecordBatchStepCore(
+                        before,
+                        after,
+                        region,
+                        actionLabel,
+                        actionReactionObserved);
+                }
+
+                internal bool TryBuildObservedDirectionalFollowUps(
+                    ActionDto firstAction,
+                    IReadOnlyList<string> remainingInputs,
+                    out ActionDto[] followUps)
+                {
+                    followUps = [];
+                    if (firstAction.Type is not ("click" or "double_click") ||
+                        !OpenAiResponsesService.TryGetObservedTurnInputLabel(
+                            firstAction,
+                            out var firstLabel))
+                    {
+                        return false;
+                    }
+
+                    RememberDirectionalClickTemplate(firstAction, firstLabel);
+                    var result = new List<ActionDto>(remainingInputs.Count);
+                    foreach (var input in remainingInputs)
+                    {
+                        if (!OpenAiResponsesService.TryNormalizeDirectionalLabel(
+                                input,
+                                out var label))
+                        {
+                            break;
+                        }
+
+                        ActionDto? template = string.Equals(
+                            label,
+                            firstLabel,
+                            StringComparison.Ordinal)
+                            ? firstAction
+                            : directionalClickTemplates.GetValueOrDefault(label);
+                        if (template is null)
+                            break;
+                        result.Add(CloneDirectionalClick(template, label));
+                    }
+
+                    if (result.Count == 0)
+                        return false;
+                    followUps = result.ToArray();
+                    return true;
+                }
+
+                void RememberDirectionalClickTemplate(
+                    ActionDto action,
+                    string actionLabel)
+                {
+                    if (action.Type is not ("click" or "double_click") ||
+                        !HasExplicitPoint(action) ||
+                        !OpenAiResponsesService.TryNormalizeDirectionalLabel(
+                            actionLabel,
+                            out var normalizedLabel))
+                    {
+                        return;
+                    }
+
+                    directionalClickTemplates[normalizedLabel] =
+                        CloneDirectionalClick(action, normalizedLabel);
+                }
+
+                static ActionDto CloneDirectionalClick(
+                    ActionDto source,
+                    string resolvedLabel) =>
+                    new()
+                    {
+                        Type = source.Type,
+                        X = source.X,
+                        Y = source.Y,
+                        XPx = source.XPx,
+                        YPx = source.YPx,
+                        BBox = source.BBox is null
+                            ? null
+                            : new BBox
+                            {
+                                Left = source.BBox.Left,
+                                Top = source.BBox.Top,
+                                Right = source.BBox.Right,
+                                Bottom = source.BBox.Bottom
+                            },
+                        Button = source.Button,
+                        Confidence = source.Confidence,
+                        Note = source.Note,
+                        ResolvedTurnInputLabel = resolvedLabel
+                    };
+
+                BatchStepAssessment RecordBatchStepCore(
+                    ScreenObservationFrame before,
+                    ScreenObservationFrame after,
+                    Rectangle region,
+                    string actionLabel,
+                    bool actionReactionObserved)
+                {
+                    var beforeFingerprint = ExtractRegionFingerprint(before, region);
+                    var afterFingerprint = ExtractRegionFingerprint(after, region);
+                    if (beforeFingerprint.Length == 0 || afterFingerprint.Length == 0)
+                    {
+                        return new BatchStepAssessment(
+                            false,
+                            false,
+                            true,
+                            false,
+                            "intermediate observation was unavailable");
+                    }
+
+                    EnsureVolatileMask(beforeFingerprint.Length);
+                    var beforeState = currentStateId ?? ResolveState(beforeFingerprint, out _);
+                    var difference = StateDifference(beforeFingerprint, afterFingerprint);
+                    var analysis = AnalyzeChanges(
+                        beforeFingerprint,
+                        afterFingerprint,
+                        learnActionPatterns: true);
+                    var result = HasPersistentVisualChange(analysis)
+                        ? "changed"
+                        : "no_effect";
+                    var cumulativeDifference = batchOriginFingerprint is { Length: > 0 } origin &&
+                                               origin.Length == afterFingerprint.Length
+                        ? StateDifference(origin, afterFingerprint)
+                        : difference;
+                    var cumulativeChangeObserved = !IsSameState(cumulativeDifference);
+                    if (result == "no_effect")
+                        consecutiveBatchNoEffect++;
+                    else
+                        consecutiveBatchNoEffect = 0;
+                    var confirmedNoEffect = result == "no_effect";
+                    var afterState = result == "no_effect"
+                        ? beforeState
+                        : ResolveActionState(
+                            afterFingerprint,
+                            beforeState,
+                            actionLabel,
+                            analysis);
+                    var knownTransition = transitions.Any(transition =>
+                        string.Equals(transition.From, beforeState, StringComparison.Ordinal) &&
+                        string.Equals(transition.Action, actionLabel, StringComparison.Ordinal) &&
+                        string.Equals(transition.To, afterState, StringComparison.Ordinal) &&
+                        string.Equals(transition.Result, result, StringComparison.Ordinal));
+                    var predictableActionPattern =
+                        IsPredictableDirectionalAction(actionLabel);
+                    var planBackedAction =
+                        shortTermPlan.IsExpectedInput(actionLabel, beforeState) &&
+                        shortTermPlan.EffectiveConfidence >= MinimumStructuredPlanConfidence;
+
+                    currentStateId = afterState;
+                    var prototype = states.FirstOrDefault(state =>
+                        string.Equals(state.Id, afterState, StringComparison.Ordinal));
+                    if (prototype is not null)
+                        prototype.Fingerprint = afterFingerprint;
+                    observedDirectionalInputs.Add(actionLabel);
+                    transitions.Enqueue(new TurnTransition(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        result));
+                    while (transitions.Count > TransitionMemoryLimit)
+                        transitions.Dequeue();
+
+                    RecordChangeEvidence(beforeState, actionLabel, afterState, analysis);
+                    if (confirmedNoEffect)
+                        shortTermPlan.Invalidate("a batched planned input had no persistent visual effect");
+                    else if (analysis.RequiresImmediateReanalysis)
+                        shortTermPlan.Invalidate("a batched plan input reached a novel or broad transition");
+                    else if (planBackedAction && result == "changed")
+                    {
+                        shortTermPlan.RecordDirectionalResult(
+                            actionLabel,
+                            beforeState,
+                            afterState,
+                            changed: true);
+                    }
+                    var summary =
+                        $"{beforeState} --{actionLabel}--> {afterState} [{result}]; transient_reaction={actionReactionObserved.ToString().ToLowerInvariant()}; predictable_action_pattern={predictableActionPattern.ToString().ToLowerInvariant()}; plan_backed={planBackedAction.ToString().ToLowerInvariant()}; no_effect_streak={consecutiveBatchNoEffect}; cumulative_change={cumulativeChangeObserved.ToString().ToLowerInvariant()}; cumulative_ratio={cumulativeDifference.ChangedRatio:0.####}; {FormatChangeAnalysis(analysis)}";
+                    return new BatchStepAssessment(
+                        !analysis.RequiresImmediateReanalysis && !confirmedNoEffect,
+                        knownTransition,
+                        analysis.RequiresImmediateReanalysis || confirmedNoEffect,
+                        result == "no_effect",
+                        summary);
+                }
+
+                internal void UpdateWorkingMemory(ActionDto action)
+                {
+                    var nextWorldState = NormalizeWorkingMemory(action.WorldStateSummary);
+                    var nextHypothesis = NormalizeWorkingMemory(action.MechanicsHypothesis);
+                    var nextSalientObservation = NormalizeWorkingMemory(
+                        action.SalientChangeObservation);
+                    if (!string.Equals(nextWorldState, worldStateSummary, StringComparison.Ordinal))
+                    {
+                        worldStateSummary = nextWorldState;
+                        Console.WriteLine(
+                            worldStateSummary is null
+                                ? "[turn-memory] world_state cleared."
+                                : $"[turn-memory] world_state={worldStateSummary}");
+                    }
+                    if (!string.Equals(nextHypothesis, mechanicsHypothesis, StringComparison.Ordinal))
+                    {
+                        mechanicsHypothesis = nextHypothesis;
+                        if (mechanicsHypothesis is not null &&
+                            !string.Equals(
+                                mechanicsHypothesisHistory.LastOrDefault(),
+                                mechanicsHypothesis,
+                                StringComparison.Ordinal))
+                        {
+                            mechanicsHypothesisHistory.Enqueue(mechanicsHypothesis);
+                            while (mechanicsHypothesisHistory.Count > 4)
+                                mechanicsHypothesisHistory.Dequeue();
+                        }
+                        Console.WriteLine(
+                            mechanicsHypothesis is null
+                                ? "[turn-memory] hypothesis cleared."
+                                : $"[turn-memory] hypothesis={mechanicsHypothesis}");
+                    }
+                    if (!string.Equals(
+                            nextSalientObservation,
+                            salientChangeObservation,
+                            StringComparison.Ordinal))
+                    {
+                        salientChangeObservation = nextSalientObservation;
+                        Console.WriteLine(
+                            salientChangeObservation is null
+                                ? "[turn-memory] salient_change_observation cleared."
+                                : $"[turn-memory] salient_change={salientChangeObservation}");
+                    }
+                }
+
+                internal bool HasRequiredSalientObservation(ActionDto action) =>
+                    !RequiresReanalysis ||
+                    !string.IsNullOrWhiteSpace(action.SalientChangeObservation);
+
+                internal void AcknowledgeReanalysis()
+                {
+                    if (!RequiresReanalysis)
+                        return;
+                    RequiresReanalysis = false;
+                    salientChangeRegions = [];
+                    Console.WriteLine("[turn] salient transition reanalysis acknowledged; one-step control resumed.");
+                }
+
+                internal string BuildPromptSummary()
+                {
+                    if (string.IsNullOrWhiteSpace(currentStateId))
+                        return "";
+
+                    var builder = new StringBuilder()
+                        .AppendLine($"TURN_STATE: {currentStateId}");
+                    if (transitions.Count > 0)
+                    {
+                        builder.AppendLine("TURN_TRANSITIONS (observed, oldest to newest):");
+                        foreach (var transition in transitions)
+                        {
+                            builder.AppendLine(
+                                $"- {transition.From} --{transition.Action}--> {transition.To} [{transition.Result}]");
+                        }
+                        builder.AppendLine("TURN_TOPOLOGY (latest observed directed edges):");
+                        foreach (var stateGroup in transitions
+                                     .Where(transition =>
+                                         IsCanonicalDirectionalInput(transition.Action))
+                                     .GroupBy(transition => transition.From))
+                        {
+                            var edges = stateGroup
+                                .GroupBy(transition => transition.Action)
+                                .Select(actionGroup => actionGroup.Last())
+                                .Select(transition =>
+                                    string.Equals(
+                                        transition.Result,
+                                        "no_effect",
+                                        StringComparison.Ordinal)
+                                        ? $"{transition.Action}=blocked"
+                                        : $"{transition.Action}->{transition.To} [{transition.Result}]");
+                            builder.AppendLine(
+                                $"- {stateGroup.Key}: {string.Join("; ", edges)}");
+                        }
+                    }
+                    if (!string.IsNullOrWhiteSpace(lastChangeSummary))
+                        builder.AppendLine($"TURN_VISUAL_CHANGE_REGIONS (percent of interaction region): {lastChangeSummary}");
+                    if (recurrentActionRegions.Any(pattern => pattern.Hits >= 2))
+                    {
+                        builder.AppendLine(
+                            "TURN_AUXILIARY_CHANGES: recurring action-correlated visual regions were observed and are treated as predictable evidence, not by themselves as a new world-rule event.");
+                    }
+                    if (LatestTransitionHadNoEffect)
+                    {
+                        builder.AppendLine(
+                            "TURN_HYPOTHESIS_CONTRADICTION: the latest state-changing input had no effect. First distinguish a blocked logical move from an unconfirmed input modality. If fixed visible directional controls exist and a keyboard direction failed, preserve the route and remap its longest valid prefix to an observed click batch; do not test one button at a time. Otherwise revise the causal model and prioritize a distinct reachable affordance.");
+                    }
+                    builder.AppendLine(
+                        $"TURN_REANALYSIS_REQUIRED: {RequiresReanalysis.ToString().ToLowerInvariant()}");
+                    if (!string.IsNullOrWhiteSpace(worldStateSummary))
+                        builder.AppendLine($"TURN_WORLD_STATE_MEMORY: {worldStateSummary}");
+                    var priorHypotheses = mechanicsHypothesisHistory
+                        .Where(item => !string.Equals(
+                            item,
+                            mechanicsHypothesis,
+                            StringComparison.Ordinal))
+                        .TakeLast(3)
+                        .ToArray();
+                    if (priorHypotheses.Length > 0)
+                    {
+                        builder.AppendLine(
+                            "TURN_PRIOR_MECHANICS_HYPOTHESES (unverified model claims; observed transitions are authoritative):");
+                        foreach (var priorHypothesis in priorHypotheses)
+                            builder.AppendLine($"- {priorHypothesis}");
+                    }
+                    if (!string.IsNullOrWhiteSpace(mechanicsHypothesis))
+                        builder.AppendLine($"TURN_MECHANICS_HYPOTHESIS: {mechanicsHypothesis}");
+                    if (!string.IsNullOrWhiteSpace(salientChangeObservation))
+                        builder.AppendLine($"TURN_LAST_SALIENT_OBSERVATION: {salientChangeObservation}");
+                    if (causalEvent is not null)
+                    {
+                        builder.AppendLine(
+                            $"TURN_CAUSAL_EVENT_LEDGER: retained independently of the model hypothesis; {causalEvent.BaselineState} --{causalEvent.TriggerAction}--> {causalEvent.ChangedState}; {causalEvent.ChangeSummary}");
+                        if (causalEvent.ReturnObserved)
+                        {
+                            builder.AppendLine(
+                                $"TURN_CAUSAL_RETURN: {causalEvent.ChangedState} --{causalEvent.ReturnAction}--> {causalEvent.BaselineState}; the earlier visual state recurred after a reversible input.");
+                        }
+                        if (causalEvent.ReenactmentObserved)
+                        {
+                            builder.AppendLine(
+                                $"TURN_CAUSAL_REENACTMENT: {causalEvent.BaselineState} --{causalEvent.ReenactmentAction}--> {causalEvent.ChangedState}; the same changed state recurred, forming observed A-B-A-B evidence.");
+                        }
+                        if (!causalEvent.ReturnObserved)
+                        {
+                            builder.AppendLine(
+                                "TURN_CAUSAL_NEXT_EVIDENCE: Prefer one safe reversible input that tests whether the changed state persists or returns before using an unrelated auxiliary control.");
+                        }
+                        else if (!causalEvent.ReenactmentObserved)
+                        {
+                            builder.AppendLine(
+                                "TURN_CAUSAL_NEXT_EVIDENCE: A return to the baseline state is observed. Prefer one safe input that could reproduce the changed state before committing to an unrelated control or long route.");
+                        }
+                        builder.AppendLine(
+                            "TURN_CAUSAL_ANALYSIS_HINT: Treat the retained state sequence and labeled temporal images as factual correlation. Infer the most general reversible world rule before trying unrelated auxiliary controls; do not assume a specific rule that is not visibly supported.");
+                    }
+                    builder.AppendLine(
+                        $"TURN_PHASE: {(CanProposeExecutionBatch ? "execution_ready" : "exploration")}");
+                    builder.Append(CanProposeExecutionBatch
+                        ? $"TURN_EXECUTION_HINT: Aggressive batching is available immediately and is the default. Commit to the strongest visible control hypothesis even when the mechanics are not yet certain; the per-input barrier is the experiment. If the current screen is a gateway, overlay, dialog, title screen, or other obvious pre-task state with a prominent primary affordance, activate that visible affordance directly before trying keyboard aliases, inspecting similarly labelled auxiliary controls, or reasoning about the hidden task. Do not inspect HELP or request another crop merely to reduce semantic uncertainty before the first reversible route. Derive a concrete route to one visible semantic waypoint and put its longest reversible prefix in planned_inputs. In visual navigation or shape-matching tasks, compare the controllable object's current geometry, colors, and orientation with any apparent terminal. If they visibly mismatch and a distinct reachable marker or transformation affordance exists, prefer that informative intermediate waypoint and re-observe its causal effect instead of forcing the incompatible terminal. When a fixed D-pad or equivalent controls are visible and keyboard focus is unconfirmed, prefer an observed click sequence for the entire route. After a keyboard no_effect, remap the route to visible controls in one batch instead of issuing a single test click. Send up to {AdvertisedMaxExecutionBatchLength} inputs and include all visible unconditional turns before the next semantic uncertainty; do not pad a route merely to reach the cap. Confidence of {MinimumStructuredPlanConfidence:0.00} is sufficient. Small recurring auxiliary interface changes do not stop the route; a confirmed no_effect, unavailable observation, broad screen/state transition, or novel local-to-distant causal change interrupts it."
+                        : RequiresReanalysis
+                            ? "TURN_REANALYSIS_HINT: A non-routine or external state change occurred. Compare every explicitly labeled temporal image actually attached to this request and the reported changed regions. Revise the causal hypothesis, then choose exactly one evidence-driven input."
+                            : "TURN_EXPLORATION_HINT: Treat this ledger as observed evidence. Promptly choose one maximally informative, goal-relevant, untried safe discrete input; avoid repeating an input recorded as no_effect. Do not narrate or solve a full route in this turn: observe this one input first. Compare the movable object with visible goal/target patterns before exhaustively testing every control, and keep planned_inputs null unless the route is already mechanically established.");
+                    return builder.ToString();
+                }
+
+                bool LatestTransitionHadNoEffect =>
+                    transitions.Count > 0 &&
+                    string.Equals(
+                        transitions.Last().Result,
+                        "no_effect",
+                        StringComparison.Ordinal);
+
+                bool HasPredictableDirectionalRun()
+                {
+                    var recent = transitions.Reverse().Take(2).ToArray();
+                    return recent.Length == 2 &&
+                           IsCanonicalDirectionalInput(recent[0].Action) &&
+                           recent.All(transition =>
+                               string.Equals(
+                                   transition.Action,
+                                   recent[0].Action,
+                                   StringComparison.Ordinal) &&
+                               string.Equals(
+                                   transition.Result,
+                                   "changed",
+                                   StringComparison.Ordinal) &&
+                               !string.Equals(
+                                   transition.From,
+                                   transition.To,
+                                   StringComparison.Ordinal));
+                }
+
+                bool HasPlanBackedDirectionalEvidence() =>
+                    shortTermPlan.HasExecutableDirectionalPlan &&
+                    HasRecentSuccessfulDirectionalEvidence(1);
+
+                bool HasRecentSuccessfulDirectionalEvidence(int requiredCount) =>
+                    transitions
+                        .Reverse()
+                        .Take(6)
+                        .Count(transition =>
+                            IsCanonicalDirectionalInput(transition.Action) &&
+                            string.Equals(
+                                transition.Result,
+                                "changed",
+                                StringComparison.Ordinal) &&
+                            !string.Equals(
+                                transition.From,
+                                transition.To,
+                                StringComparison.Ordinal)) >= requiredCount;
+
+                bool IsPredictableDirectionalAction(string actionLabel) =>
+                    IsCanonicalDirectionalInput(actionLabel) &&
+                    transitions
+                        .Reverse()
+                        .Take(6)
+                        .Count(transition =>
+                            string.Equals(
+                                transition.Action,
+                                actionLabel,
+                                StringComparison.Ordinal) &&
+                            string.Equals(
+                                transition.Result,
+                                "changed",
+                                StringComparison.Ordinal) &&
+                            !string.Equals(
+                                transition.From,
+                                transition.To,
+                                StringComparison.Ordinal)) >= 3;
+
+                string ResolveActionState(
+                    byte[] fingerprint,
+                    string beforeState,
+                    string actionLabel,
+                    ChangeAnalysis analysis) =>
+                    ResolveState(
+                        fingerprint,
+                        out _,
+                        IsCanonicalDirectionalInput(actionLabel) &&
+                        HasPersistentVisualChange(analysis)
+                            ? beforeState
+                            : null);
+
+                string ResolveState(
+                    byte[] fingerprint,
+                    out bool isNew,
+                    string? excludedStateId = null)
+                {
+                    StatePrototype? best = null;
+                    var bestScore = double.MaxValue;
+                    foreach (var state in states)
+                    {
+                        if (string.Equals(
+                                state.Id,
+                                excludedStateId,
+                                StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+                        var difference = StateDifference(state.Fingerprint, fingerprint);
+                        if (!IsSameState(difference))
+                            continue;
+                        var score = difference.ChangedRatio * 4 + difference.MeanDelta;
+                        if (score < bestScore)
+                        {
+                            bestScore = score;
+                            best = state;
+                        }
+                    }
+
+                    if (best is not null)
+                    {
+                        isNew = false;
+                        return best.Id;
+                    }
+
+                    var id = $"S{nextStateNumber++}";
+                    states.Add(new StatePrototype(id, fingerprint));
+                    isNew = true;
+                    return id;
+                }
+
+                void RecordChangeEvidence(
+                    string beforeState,
+                    string actionLabel,
+                    string afterState,
+                    ChangeAnalysis analysis)
+                {
+                    lastChangeSummary =
+                        $"{beforeState} --{actionLabel}--> {afterState}; {FormatChangeAnalysis(analysis)}";
+                    UpdateCausalEvent(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        analysis);
+                    if (analysis.RequiresImmediateReanalysis)
+                    {
+                        SetSalientChangeRegions(analysis);
+                        RequiresReanalysis = true;
+                        Console.WriteLine(
+                            $"[turn-event] salient visual change detected; reanalysis required; {lastChangeSummary}");
+                        return;
+                    }
+
+                    if (analysis.HasDistantRegions)
+                    {
+                        Console.WriteLine(
+                            $"[turn-event] distant change recorded without interrupting aggressive execution; {lastChangeSummary}");
+                    }
+
+                    salientChangeRegions = [];
+
+                    if (analysis.ChangedRatio > StateMatchChangedRatioThreshold)
+                    {
+                        ordinaryTransitionRatios.Enqueue(analysis.ChangedRatio);
+                        while (ordinaryTransitionRatios.Count > TransitionMemoryLimit)
+                            ordinaryTransitionRatios.Dequeue();
+                    }
+                }
+
+                void UpdateCausalEvent(
+                    string beforeState,
+                    string actionLabel,
+                    string afterState,
+                    ChangeAnalysis analysis)
+                {
+                    if (causalEvent is not null)
+                    {
+                        causalEvent.TransitionAge++;
+                        if (!causalEvent.ReturnObserved &&
+                            string.Equals(
+                                beforeState,
+                                causalEvent.ChangedState,
+                                StringComparison.Ordinal) &&
+                            string.Equals(
+                                afterState,
+                                causalEvent.BaselineState,
+                                StringComparison.Ordinal))
+                        {
+                            causalEvent.ReturnObserved = true;
+                            causalEvent.ReturnAction = actionLabel;
+                            Console.WriteLine(
+                                $"[turn-causal] return observed: {causalEvent.ChangedState} --{actionLabel}--> {causalEvent.BaselineState}.");
+                        }
+                        else if (causalEvent.ReturnObserved &&
+                                 !causalEvent.ReenactmentObserved &&
+                                 string.Equals(
+                                     beforeState,
+                                     causalEvent.BaselineState,
+                                     StringComparison.Ordinal) &&
+                                 string.Equals(
+                                     afterState,
+                                     causalEvent.ChangedState,
+                                     StringComparison.Ordinal))
+                        {
+                            causalEvent.ReenactmentObserved = true;
+                            causalEvent.ReenactmentAction = actionLabel;
+                            Console.WriteLine(
+                                $"[turn-causal] A-B-A-B reenactment confirmed by action {actionLabel}.");
+                        }
+
+                        var maximumAge = causalEvent.ReenactmentObserved ? 10 : 4;
+                        if (causalEvent.TransitionAge > maximumAge)
+                        {
+                            Console.WriteLine("[turn-causal] retained causal event expired after sufficient later evidence.");
+                            causalEvent = null;
+                        }
+                    }
+
+                    if (causalEvent is null &&
+                        analysis.RequiresImmediateReanalysis &&
+                        analysis.HasDistantRegions &&
+                        !string.Equals(beforeState, afterState, StringComparison.Ordinal))
+                    {
+                        causalEvent = new CausalEventEvidence(
+                            beforeState,
+                            actionLabel,
+                            afterState,
+                            FormatChangeAnalysis(analysis));
+                        Console.WriteLine(
+                            $"[turn-causal] retained possible local-to-distant causal event: {beforeState} --{actionLabel}--> {afterState}.");
+                    }
+                }
+
+                void SetSalientChangeRegions(ChangeAnalysis analysis)
+                {
+                    salientChangeRegions = analysis.NovelRegions
+                        .Select(region => new RectangleF(
+                            region.Left / (float)StateFingerprintSide,
+                            region.Top / (float)StateFingerprintSide,
+                            (region.Right - region.Left) / (float)StateFingerprintSide,
+                            (region.Bottom - region.Top) / (float)StateFingerprintSide))
+                        .Take(3)
+                        .ToArray();
+                }
+
+                ChangeAnalysis AnalyzeChanges(
+                    byte[] earlier,
+                    byte[] later,
+                    bool learnActionPatterns)
+                {
+                    var difference = StateDifference(earlier, later);
+                    var tileCount = StateFingerprintSide / ChangeTileSide;
+                    var activeTiles = new bool[tileCount * tileCount];
+                    for (var tileY = 0; tileY < tileCount; tileY++)
+                    for (var tileX = 0; tileX < tileCount; tileX++)
+                    {
+                        var changed = 0;
+                        for (var y = 0; y < ChangeTileSide; y++)
+                        for (var x = 0; x < ChangeTileSide; x++)
+                        {
+                            var pixelX = tileX * ChangeTileSide + x;
+                            var pixelY = tileY * ChangeTileSide + y;
+                            var index = pixelY * StateFingerprintSide + pixelX;
+                            if (index >= volatilePixels.Length || volatilePixels[index])
+                                continue;
+                            if (Math.Abs(earlier[index] - later[index]) >= 16)
+                                changed++;
+                        }
+                        activeTiles[tileY * tileCount + tileX] = changed >= 2;
+                    }
+
+                    var regions = ConnectedChangeRegions(activeTiles, tileCount);
+                    IReadOnlyList<ChangeRegion> novelRegions = regions;
+                    var predictableRegionCount = 0;
+                    if (learnActionPatterns && regions.Count > 0)
+                    {
+                        actionTransitionNumber++;
+                        var classification = ClassifyAndLearnActionRegions(regions);
+                        novelRegions = classification.NovelRegions;
+                        predictableRegionCount = classification.PredictableRegionCount;
+                    }
+                    var hasDistantRegions = false;
+                    for (var novelIndex = 0;
+                         novelIndex < novelRegions.Count && !hasDistantRegions;
+                         novelIndex++)
+                    for (var otherIndex = 0; otherIndex < regions.Count; otherIndex++)
+                    {
+                        if (novelRegions[novelIndex].Equals(regions[otherIndex]))
+                            continue;
+                        if (RegionCenterDistance(
+                                novelRegions[novelIndex],
+                                regions[otherIndex]) >= 0.30)
+                        {
+                            hasDistantRegions = true;
+                            break;
+                        }
+                    }
+
+                    var typicalRatio = ordinaryTransitionRatios.Count == 0
+                        ? 0.0
+                        : ordinaryTransitionRatios.OrderBy(value => value)
+                            .ElementAt(ordinaryTransitionRatios.Count / 2);
+                    var broadThreshold = Math.Max(0.025, typicalRatio * 2.5);
+                    var isBroad = novelRegions.Count > 0 &&
+                                  ordinaryTransitionRatios.Count >= 2 &&
+                                  difference.ChangedRatio >= broadThreshold;
+                    var hasCausalDistantChange =
+                        hasDistantRegions &&
+                        novelRegions.Count > 0 &&
+                        predictableRegionCount > 0;
+                    return new ChangeAnalysis(
+                        difference.MeanDelta,
+                        difference.ChangedRatio,
+                        regions,
+                        novelRegions,
+                        predictableRegionCount,
+                        hasDistantRegions,
+                        hasCausalDistantChange,
+                        isBroad);
+                }
+
+                (IReadOnlyList<ChangeRegion> NovelRegions, int PredictableRegionCount)
+                    ClassifyAndLearnActionRegions(IReadOnlyList<ChangeRegion> regions)
+                {
+                    recurrentActionRegions.RemoveAll(pattern =>
+                        actionTransitionNumber - pattern.LastSeenTransition >
+                        RecurrentRegionMaxAge);
+                    var novel = new List<ChangeRegion>();
+                    var predictable = 0;
+                    var matchedPatterns = new HashSet<RecurrentChangeRegion>();
+                    foreach (var region in regions)
+                    {
+                        var match = recurrentActionRegions
+                            .Where(pattern =>
+                                !matchedPatterns.Contains(pattern) &&
+                                RegionsFollowSamePattern(pattern.Bounds, region))
+                            .OrderBy(pattern => RegionCenterDistance(
+                                pattern.Bounds,
+                                region))
+                            .FirstOrDefault();
+                        if (match is null)
+                        {
+                            novel.Add(region);
+                            recurrentActionRegions.Add(new RecurrentChangeRegion(
+                                region,
+                                actionTransitionNumber));
+                            continue;
+                        }
+
+                        matchedPatterns.Add(match);
+                        predictable++;
+                        match.Hits++;
+                        match.Bounds = region;
+                        match.LastSeenTransition = actionTransitionNumber;
+                    }
+
+                    if (recurrentActionRegions.Count > RecurrentRegionLimit)
+                    {
+                        recurrentActionRegions.RemoveRange(
+                            0,
+                            recurrentActionRegions.Count - RecurrentRegionLimit);
+                    }
+                    return (novel, predictable);
+                }
+
+                static bool RegionsFollowSamePattern(
+                    ChangeRegion previous,
+                    ChangeRegion current)
+                {
+                    var previousWidth = Math.Max(1, previous.Right - previous.Left);
+                    var previousHeight = Math.Max(1, previous.Bottom - previous.Top);
+                    var currentWidth = Math.Max(1, current.Right - current.Left);
+                    var currentHeight = Math.Max(1, current.Bottom - current.Top);
+                    var widthSimilarity = Math.Min(previousWidth, currentWidth) /
+                                          (double)Math.Max(previousWidth, currentWidth);
+                    var heightSimilarity = Math.Min(previousHeight, currentHeight) /
+                                           (double)Math.Max(previousHeight, currentHeight);
+                    var intersectionWidth = Math.Max(
+                        0,
+                        Math.Min(previous.Right, current.Right) -
+                        Math.Max(previous.Left, current.Left));
+                    var intersectionHeight = Math.Max(
+                        0,
+                        Math.Min(previous.Bottom, current.Bottom) -
+                        Math.Max(previous.Top, current.Top));
+                    var intersection = intersectionWidth * intersectionHeight;
+                    var union = previousWidth * previousHeight +
+                                currentWidth * currentHeight - intersection;
+                    var intersectionOverUnion = union <= 0
+                        ? 0
+                        : intersection / (double)union;
+                    var centerDistance = RegionCenterDistance(previous, current);
+                    var verticalOverlap = intersectionHeight /
+                                          (double)Math.Min(previousHeight, currentHeight);
+                    return intersectionOverUnion >= 0.15 ||
+                           widthSimilarity >= 0.50 &&
+                           heightSimilarity >= 0.50 &&
+                           centerDistance <= 0.12 ||
+                           verticalOverlap >= 0.60 &&
+                           heightSimilarity >= 0.50 &&
+                           centerDistance <= 0.12;
+                }
+
+                static double RegionCenterDistance(
+                    ChangeRegion left,
+                    ChangeRegion right)
+                {
+                    var leftCenterX = (left.Left + left.Right) / 2.0;
+                    var leftCenterY = (left.Top + left.Bottom) / 2.0;
+                    var rightCenterX = (right.Left + right.Right) / 2.0;
+                    var rightCenterY = (right.Top + right.Bottom) / 2.0;
+                    return Math.Sqrt(
+                        Math.Pow(
+                            (leftCenterX - rightCenterX) /
+                            StateFingerprintSide,
+                            2) +
+                        Math.Pow(
+                            (leftCenterY - rightCenterY) /
+                            StateFingerprintSide,
+                            2));
+                }
+
+                static bool HasSpatiallySeparatedChangeRegions(
+                    IReadOnlyList<ChangeRegion> regions)
+                {
+                    for (var first = 0; first < regions.Count; first++)
+                    for (var second = first + 1; second < regions.Count; second++)
+                    {
+                        if (RegionCenterDistance(regions[first], regions[second]) >= 0.30)
+                            return true;
+                    }
+                    return false;
+                }
+
+                static bool HasPersistentVisualChange(ChangeAnalysis analysis) =>
+                    analysis.Regions.Count > 0 ||
+                    analysis.ChangedRatio >= 0.00025 ||
+                    analysis.MeanDelta >= 0.00005;
+
+                static bool IsPeripheralOnlyChange(
+                    IReadOnlyList<ChangeRegion> regions)
+                {
+                    if (regions.Count == 0)
+                        return false;
+
+                    const int topChromeBoundary = StateFingerprintSide / 8;
+                    const int edgeBoundary = 2;
+                    return regions.All(region =>
+                        region.Bottom <= topChromeBoundary ||
+                        region.Top >= StateFingerprintSide - edgeBoundary ||
+                        region.Right <= edgeBoundary ||
+                        region.Left >= StateFingerprintSide - edgeBoundary);
+                }
+
+                static List<ChangeRegion> ConnectedChangeRegions(
+                    bool[] activeTiles,
+                    int tileCount)
+                {
+                    var regions = new List<ChangeRegion>();
+                    var visited = new bool[activeTiles.Length];
+                    for (var start = 0; start < activeTiles.Length; start++)
+                    {
+                        if (!activeTiles[start] || visited[start])
+                            continue;
+                        var queue = new Queue<int>();
+                        queue.Enqueue(start);
+                        visited[start] = true;
+                        var minX = tileCount;
+                        var minY = tileCount;
+                        var maxX = 0;
+                        var maxY = 0;
+                        var changedTiles = 0;
+                        while (queue.Count > 0)
+                        {
+                            var current = queue.Dequeue();
+                            var x = current % tileCount;
+                            var y = current / tileCount;
+                            minX = Math.Min(minX, x);
+                            minY = Math.Min(minY, y);
+                            maxX = Math.Max(maxX, x);
+                            maxY = Math.Max(maxY, y);
+                            changedTiles++;
+                            for (var dy = -1; dy <= 1; dy++)
+                            for (var dx = -1; dx <= 1; dx++)
+                            {
+                                if (dx == 0 && dy == 0)
+                                    continue;
+                                var nx = x + dx;
+                                var ny = y + dy;
+                                if (nx < 0 || ny < 0 || nx >= tileCount || ny >= tileCount)
+                                    continue;
+                                var neighbor = ny * tileCount + nx;
+                                if (!activeTiles[neighbor] || visited[neighbor])
+                                    continue;
+                                visited[neighbor] = true;
+                                queue.Enqueue(neighbor);
+                            }
+                        }
+                        regions.Add(new ChangeRegion(
+                            minX * ChangeTileSide,
+                            minY * ChangeTileSide,
+                            (maxX + 1) * ChangeTileSide,
+                            (maxY + 1) * ChangeTileSide,
+                            changedTiles * ChangeTileSide * ChangeTileSide));
+                    }
+                    return regions
+                        .OrderByDescending(region => region.ChangedPixels)
+                        .Take(6)
+                        .ToList();
+                }
+
+                static string FormatChangeAnalysis(ChangeAnalysis analysis)
+                {
+                    var regions = analysis.Regions.Count == 0
+                        ? "none"
+                        : string.Join(", ", analysis.Regions.Select(region =>
+                            $"[{Percent(region.Left)}..{Percent(region.Right)}% x, {Percent(region.Top)}..{Percent(region.Bottom)}% y]"));
+                    return
+                        $"changed_ratio={analysis.ChangedRatio:0.####}; mean_delta={analysis.MeanDelta:0.####}; regions={regions}; novel_regions={analysis.NovelRegions.Count}; predictable_regions={analysis.PredictableRegionCount}; distant={analysis.HasDistantRegions.ToString().ToLowerInvariant()}; causal_distant={analysis.HasCausalDistantChange.ToString().ToLowerInvariant()}; broad={analysis.IsBroad.ToString().ToLowerInvariant()}";
+                }
+
+                static int Percent(int coordinate) =>
+                    Math.Clamp((int)Math.Round(coordinate * 100.0 / StateFingerprintSide), 0, 100);
+
+                static string? NormalizeWorkingMemory(string? value)
+                {
+                    if (string.IsNullOrWhiteSpace(value))
+                        return null;
+                    return TrimForMeta(value.Trim(), 280);
+                }
+
+                void EnsureVolatileMask(int length)
+                {
+                    if (volatilePixels.Length != length)
+                        volatilePixels = new bool[length];
+                }
+
+                void LearnAmbientPixels(byte[] earlier, byte[] later)
+                {
+                    var count = Math.Min(
+                        volatilePixels.Length,
+                        Math.Min(earlier.Length, later.Length));
+                    var changedPixels = new List<int>();
+                    for (var index = 0; index < count; index++)
+                    {
+                        if (Math.Abs(earlier[index] - later[index]) >= 8)
+                            changedPixels.Add(index);
+                    }
+
+                    const int ambientDilationRadius = 2;
+                    foreach (var changedIndex in changedPixels)
+                    {
+                        var centerX = changedIndex % StateFingerprintSide;
+                        var centerY = changedIndex / StateFingerprintSide;
+                        for (var dy = -ambientDilationRadius; dy <= ambientDilationRadius; dy++)
+                        for (var dx = -ambientDilationRadius; dx <= ambientDilationRadius; dx++)
+                        {
+                            var x = centerX + dx;
+                            var y = centerY + dy;
+                            if (x < 0 || y < 0 ||
+                                x >= StateFingerprintSide ||
+                                y >= StateFingerprintSide)
+                            {
+                                continue;
+                            }
+                            var neighbor = y * StateFingerprintSide + x;
+                            if (neighbor < volatilePixels.Length)
+                                volatilePixels[neighbor] = true;
+                        }
+                    }
+                }
+
+                (double MeanDelta, double ChangedRatio) StateDifference(
+                    byte[] left,
+                    byte[] right)
+                {
+                    var count = Math.Min(
+                        volatilePixels.Length,
+                        Math.Min(left.Length, right.Length));
+                    if (count == 0)
+                        return (1, 1);
+
+                    double sum = 0;
+                    var changed = 0;
+                    var compared = 0;
+                    for (var index = 0; index < count; index++)
+                    {
+                        if (volatilePixels[index])
+                            continue;
+                        var difference = Math.Abs(left[index] - right[index]);
+                        sum += difference / 255.0;
+                        if (difference >= 8)
+                            changed++;
+                        compared++;
+                    }
+                    return compared == 0
+                        ? (1, 1)
+                        : (sum / compared, changed / (double)compared);
+                }
+
+                static bool IsSameState((double MeanDelta, double ChangedRatio) difference) =>
+                    difference.MeanDelta <= StateMatchMeanThreshold &&
+                    difference.ChangedRatio <= StateMatchChangedRatioThreshold;
+
+                static byte[] ExtractRegionFingerprint(
+                    ScreenObservationFrame frame,
+                    Rectangle region)
+                {
+                    if (frame.DetailWidth <= 0 ||
+                        frame.DetailHeight <= 0 ||
+                        frame.DetailFingerprint.Length != frame.DetailWidth * frame.DetailHeight)
+                    {
+                        return [];
+                    }
+
+                    region.Intersect(frame.ScreenBounds);
+                    if (region.Width <= 0 || region.Height <= 0)
+                        return [];
+
+                    var output = new byte[StateFingerprintSide * StateFingerprintSide];
+                    for (var y = 0; y < StateFingerprintSide; y++)
+                    {
+                        var screenY = region.Top +
+                            (y + 0.5) * region.Height / StateFingerprintSide;
+                        var detailY = Math.Clamp(
+                            (int)((screenY - frame.ScreenBounds.Top) * frame.DetailHeight /
+                                  Math.Max(1.0, frame.ScreenBounds.Height)),
+                            0,
+                            frame.DetailHeight - 1);
+                        for (var x = 0; x < StateFingerprintSide; x++)
+                        {
+                            var screenX = region.Left +
+                                (x + 0.5) * region.Width / StateFingerprintSide;
+                            var detailX = Math.Clamp(
+                                (int)((screenX - frame.ScreenBounds.Left) * frame.DetailWidth /
+                                      Math.Max(1.0, frame.ScreenBounds.Width)),
+                                0,
+                                frame.DetailWidth - 1);
+                            var value = frame.DetailFingerprint[
+                                detailY * frame.DetailWidth + detailX];
+                            output[y * StateFingerprintSide + x] =
+                                (byte)(value / 8 * 8);
+                        }
+                    }
+                    return output;
+                }
+
+                static string TurnActionLabel(ResolvedActionSnapshot snapshot)
+                {
+                    var action = snapshot.Action;
+                    if (OpenAiResponsesService.TryNormalizeDirectionalLabel(
+                            action.ResolvedTurnInputLabel,
+                            out var resolvedTurnInputLabel))
+                    {
+                        return resolvedTurnInputLabel;
+                    }
+                    if (action.Type == "keys" && action.Keys is { Length: > 0 })
+                        return string.Join(",", action.Keys.Select(CanonicalKeyLabel));
+                    if (action.Type is "click" or "double_click" or "click_uia" or "focus_uia")
+                    {
+                        var target = string.IsNullOrWhiteSpace(action.Note)
+                            ? snapshot.SemanticTokens
+                            : action.Note;
+                        var direction = CanonicalDirectionLabel(target);
+                        if (direction is not null)
+                            return direction;
+                        return string.IsNullOrWhiteSpace(target)
+                            ? action.Type
+                            : $"{action.Type}:{TrimForMeta(target, 48)}";
+                    }
+                    return action.Type;
+                }
+
+                static string CanonicalKeyLabel(string key) =>
+                    CanonicalDirectionLabel(key) ?? key.Trim();
+
+                static string? CanonicalDirectionLabel(string? value)
+                {
+                    var text = value ?? "";
+                    if (Regex.IsMatch(text, @"\b(arrowright|right|w prawo|praw\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                        return "ArrowRight";
+                    if (Regex.IsMatch(text, @"\b(arrowleft|left|w lewo|lew\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                        return "ArrowLeft";
+                    if (Regex.IsMatch(text, @"\b(arrowup|up|w gór\w*|gór\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                        return "ArrowUp";
+                    if (Regex.IsMatch(text, @"\b(arrowdown|down|w dół|dol\w*|dół)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                        return "ArrowDown";
+                    return null;
+                }
+
+                static bool IsCanonicalDirectionalInput(string label) =>
+                    label.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .All(item => item is "ArrowRight" or "ArrowLeft" or "ArrowUp" or "ArrowDown" or
+                            "W" or "A" or "S" or "D" or "w" or "a" or "s" or "d");
+            }
+
+            internal static bool ActionNeedsEffectObservation(ActionDto action) =>
+                action.Type is not ("aim" or "point" or "request_crop" or "move" or "done");
+
+            internal static bool ShouldCheckPreRegionTurnActionFreshness(
+                string actionPolicy,
+                Rectangle? turnBasedInteractionRect,
+                ActionDto action) =>
+                string.Equals(
+                    actionPolicy,
+                    "turn_based_interaction",
+                    StringComparison.Ordinal) &&
+                turnBasedInteractionRect is null &&
+                IsStateChangingInteractionAction(action) &&
+                (IsSpatialPointerAction(action) ||
+                 action.Type is "drag_drop" or "drag_path" or "click_uia" or "focus_uia");
+
+            internal static bool ShouldDiscardPreRegionTurnAction(
+                ScreenObservationFrame promptFrame,
+                ScreenObservationFrame immediateFrame,
+                ScreenObservationFrame confirmationFrame,
+                out double promptDelta,
+                out double stabilityDelta)
+            {
+                promptDelta = Math.Max(
+                    ComputeImageDelta(
+                        promptFrame.GlobalFingerprint,
+                        immediateFrame.GlobalFingerprint),
+                    ComputeImageDelta(
+                        promptFrame.ActiveWindowFingerprint,
+                        immediateFrame.ActiveWindowFingerprint));
+                stabilityDelta = Math.Max(
+                    ComputeImageDelta(
+                        immediateFrame.GlobalFingerprint,
+                        confirmationFrame.GlobalFingerprint),
+                    ComputeImageDelta(
+                        immediateFrame.ActiveWindowFingerprint,
+                        confirmationFrame.ActiveWindowFingerprint));
+                return promptDelta >= 0.0035 &&
+                       stabilityDelta <= Math.Max(0.0015, promptDelta * 0.35);
+            }
 
             internal static bool IsExpectedContinuousIdle(
                 string goalMode,
@@ -1026,6 +4220,22 @@
                 string.Equals(goalMode, "continuous", StringComparison.Ordinal) &&
                 previousAction?.Type == "wait";
 
+            internal static bool ShouldRegisterImmediateNoEffectCooldown(
+                ActionDto action,
+                ObservationAssessment assessment,
+                int repeatCount) =>
+                assessment.ActionOutcome == ActionOutcomeState.NoEffect &&
+                ActionRepeatCooldownSteps > 0 &&
+                action.Type is not ("wait" or "done") &&
+                !IsLocalObservationAction(action) &&
+                !IsTextInputAttemptAction(action) &&
+                (!string.Equals(
+                     assessment.ActionPolicy,
+                     "turn_based_interaction",
+                     StringComparison.Ordinal) ||
+                 !IsStateChangingInteractionAction(action) ||
+                 repeatCount > 0);
+
             internal static bool ShouldResetRejectedProposalLoop(
                 ResolvedActionSnapshot? previousAction,
                 bool noChange,
@@ -1034,7 +4244,7 @@
                 !noChange &&
                 !expectedContinuousIdle &&
                 !IsLocalObservationAction(previousAction.Action);
-        
+
             internal static bool IsSpatialPointerAction(ActionDto action)
                 => action.Type is "move" or "click" or "double_click";
 
@@ -1157,6 +4367,13 @@
                     cooldowns.Remove(expired);
                 }
 
+                if (cooldowns.TryGetValue(action.IneffectiveSignature, out untilStep))
+                {
+                    if (step <= untilStep)
+                        return true;
+                    cooldowns.Remove(action.IneffectiveSignature);
+                }
+
                 var family = RecoveryMemoryService.ActionFamily(action.Action);
                 if (action.ScreenPoint is Point screenPoint &&
                     (IsSpatialPointerAction(action.Action) || family == "drag_drop"))
@@ -1181,13 +4398,6 @@
                     return untilStep >= step;
                 }
 
-                if (!cooldowns.TryGetValue(action.IneffectiveSignature, out untilStep))
-                    return false;
-        
-                if (step <= untilStep)
-                    return true;
-        
-                cooldowns.Remove(action.IneffectiveSignature);
                 return false;
             }
 
@@ -1195,10 +4405,12 @@
                 ResolvedActionSnapshot action,
                 int untilStep,
                 Dictionary<string, int> cooldowns,
-                List<SpatialActionCooldown> spatialCooldowns)
+                List<SpatialActionCooldown> spatialCooldowns,
+                bool clusterSpatially = true)
             {
                 var family = RecoveryMemoryService.ActionFamily(action.Action);
-                if (action.ScreenPoint is Point screenPoint &&
+                if (clusterSpatially &&
+                    action.ScreenPoint is Point screenPoint &&
                     (IsSpatialPointerAction(action.Action) || family == "drag_drop"))
                 {
                     spatialCooldowns.Add(new SpatialActionCooldown(
@@ -1250,32 +4462,39 @@
                 return Math.Max(UiSettleDelayMs, DelayFor(a));
             }
         
-            internal static async Task WaitAfterActionAsync(ActionDto action, byte[] beforeFingerprint, CancellationToken cancellationToken)
+            internal static async Task<bool> WaitAfterActionAsync(
+                ActionDto action,
+                byte[] beforeFingerprint,
+                string observationPolicy,
+                byte[]? beforeLocalFingerprint,
+                Rectangle? localRegion,
+                CancellationToken cancellationToken,
+                bool preferFastTurnSettle = false)
             {
                 if (IsLocalObservationAction(action))
-                    return;
+                    return false;
         
                 if (!ScreenPollingEnabled)
                 {
                     var fixedDelay = PostActionDelay(action);
                     if (fixedDelay > 0)
                         await Task.Delay(fixedDelay, cancellationToken);
-                    return;
+                    return false;
                 }
         
                 if (action.Type == "wait")
                 {
                     if (WaitNoChangeExtraMs <= 0)
-                        return;
+                        return false;
         
                     var afterWait = CaptureScreenFingerprintProbe();
                     var delta = ComputeImageDelta(beforeFingerprint, afterWait);
-                    if (delta < NoChangeThreshold)
+                    if (delta < SettleThresholdFor(action))
                     {
-                        Console.WriteLine($"[settle] screen unchanged after wait (delta={delta:0.####}); waiting extra {WaitNoChangeExtraMs} ms.");
+                        Console.WriteLine($"[settle] screen unchanged after wait (coarse_delta={delta:0.####}); waiting extra {WaitNoChangeExtraMs} ms.");
                         await Task.Delay(WaitNoChangeExtraMs, cancellationToken);
                     }
-                    return;
+                    return false;
                 }
         
                 var initialDelay = Math.Min(PostActionDelay(action), Math.Max(0, ScreenPollInitialDelayMs));
@@ -1283,9 +4502,146 @@
                     await Task.Delay(initialDelay, cancellationToken);
         
                 if (ScreenPollTimeoutMs <= 0)
-                    return;
-        
+                    return false;
+
+                if (string.Equals(
+                        observationPolicy,
+                        "turn_based_interaction",
+                        StringComparison.Ordinal) &&
+                    beforeLocalFingerprint is { Length: > 0 } &&
+                    localRegion is Rectangle turnRegion)
+                {
+                    return await WaitForLocalScreenReactionAndStableAsync(
+                        beforeLocalFingerprint,
+                        turnRegion,
+                        action,
+                        cancellationToken,
+                        preferFastTurnSettle);
+                }
+
+                if (observationPolicy == "realtime_interaction" ||
+                    action.Type == "hold_keys" ||
+                    action.Type == "drag_path" && action.GestureKind is "game" or "pan")
+                    return false;
+
+                if (observationPolicy is "event_driven" or "streaming_output")
+                {
+                    await WaitForScreenReactionAsync(
+                        beforeFingerprint,
+                        action,
+                        cancellationToken);
+                    return false;
+                }
+
                 await WaitForScreenStableAsync(beforeFingerprint, action, cancellationToken);
+                return false;
+            }
+
+            internal static async Task<bool> WaitForLocalScreenReactionAndStableAsync(
+                byte[] beforeFingerprint,
+                Rectangle region,
+                ActionDto action,
+                CancellationToken cancellationToken,
+                bool preferFastSettle = false)
+            {
+                const double reactionThreshold = 0.0012;
+                const double reactionRatioThreshold = 0.0015;
+                const double stableThreshold = 0.0007;
+                const double stableRatioThreshold = 0.0008;
+                var requiredStableProbes = preferFastSettle ? 1 : 2;
+                var pollIntervalMs = preferFastSettle
+                    ? Math.Min(ScreenPollIntervalMs, 75)
+                    : ScreenPollIntervalMs;
+                var timeoutMs = preferFastSettle
+                    ? Math.Min(ScreenPollTimeoutMs, 650)
+                    : ScreenPollTimeoutMs;
+                var settleMode = preferFastSettle ? "fast" : "adaptive";
+
+                var sw = Stopwatch.StartNew();
+                byte[]? previous = null;
+                var sawReaction = false;
+                var stableProbes = 0;
+                var probes = 0;
+                double lastFromBefore = double.NaN;
+                double lastBetween = double.NaN;
+                double lastFromBeforeRatio = double.NaN;
+                double lastBetweenRatio = double.NaN;
+                while (sw.ElapsedMilliseconds < timeoutMs)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var current = CaptureRegionFingerprintProbe(region);
+                    probes++;
+                    lastFromBefore = ComputeImageDelta(beforeFingerprint, current);
+                    lastFromBeforeRatio = ComputeChangedPixelRatio(
+                        beforeFingerprint,
+                        current);
+                    if (lastFromBefore >= reactionThreshold ||
+                        lastFromBeforeRatio >= reactionRatioThreshold)
+                        sawReaction = true;
+
+                    if (sawReaction && previous is not null)
+                    {
+                        lastBetween = ComputeImageDelta(previous, current);
+                        lastBetweenRatio = ComputeChangedPixelRatio(previous, current);
+                        stableProbes = lastBetween < stableThreshold &&
+                                       lastBetweenRatio < stableRatioThreshold
+                            ? stableProbes + 1
+                            : 0;
+                        if (stableProbes >= requiredStableProbes)
+                        {
+                            Console.WriteLine(
+                                $"[settle] local reaction stable after {sw.ElapsedMilliseconds} ms; probes={probes}; local_delta={lastFromBefore:0.####}; local_ratio={lastFromBeforeRatio:0.####}; action={action.Type}; mode={settleMode}");
+                            return true;
+                        }
+                    }
+
+                    previous = current;
+                    var remaining = timeoutMs - (int)sw.ElapsedMilliseconds;
+                    if (remaining <= 0)
+                        break;
+                    await Task.Delay(
+                        Math.Min(pollIntervalMs, remaining),
+                        cancellationToken);
+                }
+
+                Console.WriteLine(
+                    sawReaction
+                        ? $"[settle] local reaction reached timeout after {sw.ElapsedMilliseconds} ms; probes={probes}; local_delta={lastFromBefore:0.####}; local_ratio={lastFromBeforeRatio:0.####}; local_between_delta={lastBetween:0.####}; local_between_ratio={lastBetweenRatio:0.####}; action={action.Type}; mode={settleMode}"
+                        : $"[settle] no local reaction within {sw.ElapsedMilliseconds} ms; probes={probes}; local_delta={lastFromBefore:0.####}; local_ratio={lastFromBeforeRatio:0.####}; action={action.Type}; mode={settleMode}");
+                return sawReaction;
+            }
+
+            internal static async Task WaitForScreenReactionAsync(
+                byte[] beforeFingerprint,
+                ActionDto action,
+                CancellationToken cancellationToken)
+            {
+                var sw = Stopwatch.StartNew();
+                var probes = 0;
+                double delta = double.NaN;
+                var threshold = SettleThresholdFor(action);
+                while (sw.ElapsedMilliseconds < ScreenPollTimeoutMs)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    delta = ComputeImageDelta(
+                        beforeFingerprint,
+                        CaptureScreenFingerprintProbe());
+                    probes++;
+                    if (delta >= threshold)
+                    {
+                        Console.WriteLine(
+                            $"[settle] reaction started after {sw.ElapsedMilliseconds} ms; probes={probes}; coarse_delta={delta:0.####}; action={action.Type}");
+                        return;
+                    }
+                    var remaining = ScreenPollTimeoutMs - (int)sw.ElapsedMilliseconds;
+                    if (remaining <= 0)
+                        break;
+                    await Task.Delay(
+                        Math.Min(ScreenPollIntervalMs, remaining),
+                        cancellationToken);
+                }
+                Console.WriteLine(
+                    $"[settle] no visible reaction within {sw.ElapsedMilliseconds} ms; probes={probes}; coarse_delta={delta:0.####}; action={action.Type}");
             }
         
             internal static async Task WaitForScreenStableAsync(byte[] beforeFingerprint, ActionDto action, CancellationToken cancellationToken)
@@ -1296,6 +4652,7 @@
                 var probes = 0;
                 double lastFromBefore = double.NaN;
                 double lastBetween = double.NaN;
+                var settleThreshold = SettleThresholdFor(action);
         
                 while (sw.ElapsedMilliseconds < ScreenPollTimeoutMs)
                 {
@@ -1303,15 +4660,15 @@
                     var current = CaptureScreenFingerprintProbe();
                     probes++;
                     lastFromBefore = ComputeImageDelta(beforeFingerprint, current);
-                    if (lastFromBefore >= NoChangeThreshold)
+                    if (lastFromBefore >= settleThreshold)
                         sawChange = true;
         
                     if (previous != null)
                     {
                         lastBetween = ComputeImageDelta(previous, current);
-                        if (lastBetween < NoChangeThreshold && (sawChange || probes >= 2))
+                        if (lastBetween < settleThreshold && (sawChange || probes >= 2))
                         {
-                            Console.WriteLine($"[settle] stable after {sw.ElapsedMilliseconds} ms; probes={probes}; delta={lastFromBefore:0.####}; action={action.Type}");
+                            Console.WriteLine($"[settle] stable after {sw.ElapsedMilliseconds} ms; probes={probes}; coarse_delta={lastFromBefore:0.####}; action={action.Type}");
                             return;
                         }
                     }
@@ -1324,7 +4681,7 @@
                 }
         
                 if (probes > 0)
-                    Console.WriteLine($"[settle] timeout after {sw.ElapsedMilliseconds} ms; probes={probes}; delta={lastFromBefore:0.####}; between={lastBetween:0.####}; action={action.Type}");
+                    Console.WriteLine($"[settle] timeout after {sw.ElapsedMilliseconds} ms; probes={probes}; coarse_delta={lastFromBefore:0.####}; coarse_between_delta={lastBetween:0.####}; action={action.Type}");
             }
         
             internal static byte[] CaptureScreenFingerprintProbe()
@@ -1345,14 +4702,30 @@
                     RunScreenProbeElapsed += sw.Elapsed;
                 }
             }
+
+            internal static double SettleThresholdFor(ActionDto action) => action.Type switch
+            {
+                "drag_path" => 0.0025,
+                "click" or "double_click" or "focus_uia" or "click_uia" or
+                    "type_text" or "paste_text" or "keys" => 0.0035,
+                "hold_keys" => 0.008,
+                _ => NoChangeThreshold
+            };
         
             internal static async Task<BatchedActionExecutionResult> ExecuteQueuedSafeActionsAsync(
                 StringBuilder historyBuffer,
                 int step,
+                ActionDto initialAction,
+                byte[] initialBaselineFingerprint,
                 CancellationToken cancellationToken)
             {
                 var batchIndex = 0;
                 var executed = new List<ResolvedActionSnapshot>();
+                var previousAction = initialAction;
+                var navigationLikeBatch = IsNavigationBatchPrelude(initialAction);
+                byte[]? transitionBaseline = IsAdaptiveBatchWaitTrigger(initialAction)
+                    ? initialBaselineFingerprint
+                    : null;
                 while (PendingSafeActions.Count > 0)
                 {
                     var action = PendingSafeActions.Dequeue();
@@ -1365,22 +4738,45 @@
                         if (!snapshot.IsValid)
                             throw new InvalidOperationException(snapshot.ValidationError);
 
+                        var transitionDelayMs = BatchTransitionDelayMs(previousAction, action);
+                        if (transitionDelayMs > 0)
+                        {
+                            Console.WriteLine(
+                                $"[batch] transition {previousAction.Type}->{action.Type}; delay={transitionDelayMs}ms");
+                            await Task.Delay(transitionDelayMs, cancellationToken);
+                        }
+
                         if (action.Type == "wait")
                         {
                             var secs = EffectiveWaitSeconds(action, out var requestedSecs);
                             if (secs < requestedSecs)
                                 Console.WriteLine($"[wait] Requested {requestedSecs}s capped to {secs}s.");
-                            Console.WriteLine($"[wait] Sleeping {secs} s (batched)...");
-                            await Task.Delay(secs * 1000, cancellationToken);
+                            if (transitionBaseline is not null && secs > 0)
+                            {
+                                await WaitForBatchedTransitionAsync(
+                                    transitionBaseline,
+                                    previousAction,
+                                    secs * 1000,
+                                    navigationLikeBatch,
+                                    cancellationToken);
+                            }
+                            else
+                            {
+                                Console.WriteLine($"[wait] Sleeping {secs} s (batched)...");
+                                await Task.Delay(secs * 1000, cancellationToken);
+                            }
                         }
                         else
                         {
+                            transitionBaseline = IsAdaptiveBatchWaitTrigger(action)
+                                ? CaptureScreenFingerprintProbe()
+                                : null;
                             ExecuteAction(action);
-                            await Task.Delay(Math.Max(0, DelayFor(action)), cancellationToken);
                         }
         
                         AddHistory(historyBuffer, $"[{step}.{batchIndex}] batch {Describe(action)}");
                         executed.Add(snapshot);
+                        previousAction = action;
                     }
                     catch (Exception ex)
                     {
@@ -1400,6 +4796,457 @@
 
                 return new BatchedActionExecutionResult(executed, null);
             }
+
+            internal static bool IsAdaptiveBatchWaitTrigger(ActionDto action) =>
+                action.Type is "open_url" or "launch_app" or "run_command" ||
+                OpenAiResponsesService.IsCommitKeys(action);
+
+            internal static async Task WaitForBatchedTransitionAsync(
+                byte[] beforeFingerprint,
+                ActionDto triggerAction,
+                int timeoutMs,
+                bool navigationLikeBatch,
+                CancellationToken cancellationToken)
+            {
+                if (timeoutMs <= 0)
+                    return;
+
+                var sw = Stopwatch.StartNew();
+                byte[] previous = beforeFingerprint;
+                var sawChange = false;
+                var lastChangeAtMs = 0L;
+                var probes = 0;
+                var threshold = SettleThresholdFor(triggerAction);
+                double lastFromBefore = double.NaN;
+                double lastBetween = double.NaN;
+                var minimumObservationMs = AdaptiveBatchMinimumObservationMs(
+                    timeoutMs,
+                    navigationLikeBatch);
+                var quietWindowMs = Math.Min(350, timeoutMs);
+
+                while (sw.ElapsedMilliseconds < timeoutMs)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var remaining = timeoutMs - (int)sw.ElapsedMilliseconds;
+                    if (remaining <= 0)
+                        break;
+                    await Task.Delay(Math.Min(100, remaining), cancellationToken);
+
+                    var current = CaptureScreenFingerprintProbe();
+                    probes++;
+                    lastFromBefore = ComputeImageDelta(beforeFingerprint, current);
+                    lastBetween = ComputeImageDelta(previous, current);
+                    if (lastFromBefore >= threshold)
+                        sawChange = true;
+                    if (lastBetween >= threshold)
+                        lastChangeAtMs = sw.ElapsedMilliseconds;
+
+                    previous = current;
+                    if (sawChange &&
+                        sw.ElapsedMilliseconds >= minimumObservationMs &&
+                        sw.ElapsedMilliseconds - lastChangeAtMs >= quietWindowMs)
+                    {
+                        Console.WriteLine(
+                            $"[batch] adaptive wait settled after {sw.ElapsedMilliseconds}ms; minimum={minimumObservationMs}ms; cap={timeoutMs}ms; probes={probes}; action={triggerAction.Type}");
+                        return;
+                    }
+                }
+
+                Console.WriteLine(
+                    $"[batch] adaptive wait reached cap after {sw.ElapsedMilliseconds}ms; probes={probes}; coarse_delta={lastFromBefore:0.####}; coarse_between_delta={lastBetween:0.####}; action={triggerAction.Type}");
+            }
+
+            internal static int AdaptiveBatchMinimumObservationMs(
+                int timeoutMs,
+                bool navigationLikeBatch) =>
+                navigationLikeBatch
+                    ? Math.Max(0, timeoutMs)
+                    : Math.Min(900, Math.Max(0, timeoutMs));
+
+            internal static bool IsNavigationBatchPrelude(ActionDto action)
+            {
+                if (action.Type == "open_url")
+                    return true;
+                if (action.Type != "keys" || action.Keys is not { Length: > 0 } keys)
+                    return false;
+
+                var normalized = keys
+                    .SelectMany(key => (key ?? "").Split(
+                        '+',
+                        StringSplitOptions.RemoveEmptyEntries |
+                        StringSplitOptions.TrimEntries))
+                    .Select(key => key.ToLowerInvariant())
+                    .ToArray();
+                return normalized.SequenceEqual(["win", "r"]) ||
+                       normalized.SequenceEqual(["super", "r"]) ||
+                       normalized.SequenceEqual(["meta", "r"]) ||
+                       normalized.SequenceEqual(["ctrl", "l"]) ||
+                       normalized.SequenceEqual(["ctrl", "k"]);
+            }
+
+            internal static int BatchTransitionDelayMs(ActionDto previous, ActionDto next)
+            {
+                if (next.Type == "wait")
+                    return 0;
+
+                if (previous.Type == "keys" && OpenAiResponsesService.IsTextEntryPrelude(previous) &&
+                    next.Type is "type_text" or "paste_text")
+                {
+                    return 250;
+                }
+
+                if (previous.Type is "type_text" or "paste_text" && OpenAiResponsesService.IsCommitKeys(next))
+                    return 500;
+
+                if (previous.Type is "type_text" or "paste_text" &&
+                    next.Type is "type_text" or "paste_text")
+                {
+                    return 100;
+                }
+
+                return Math.Max(80, DelayFor(previous));
+            }
+
+            internal static ResolvedActionSnapshot AttachFocusedTextObservationRegion(
+                ResolvedActionSnapshot snapshot,
+                Rectangle? focusedUiaRect)
+            {
+                if (snapshot.Action.Type is not ("type_text" or "paste_text") ||
+                    focusedUiaRect is not Rectangle focus ||
+                    focus.Width <= 0 ||
+                    focus.Height <= 0)
+                {
+                    return snapshot;
+                }
+
+                focus.Inflate(8, 8);
+                return snapshot with { ObservationRegion = ClampRect(focus) };
+            }
+
+            internal static ResolvedActionSnapshot AttachTurnBasedObservationRegion(
+                ResolvedActionSnapshot snapshot,
+                Rectangle? interactionRegion,
+                string observationPolicy)
+            {
+                if (!string.Equals(
+                        observationPolicy,
+                        "turn_based_interaction",
+                        StringComparison.Ordinal) ||
+                    interactionRegion is not Rectangle region ||
+                    region.Width <= 0 ||
+                    region.Height <= 0 ||
+                    !IsStateChangingInteractionAction(snapshot.Action))
+                {
+                    return snapshot;
+                }
+
+                return snapshot with { ObservationRegion = ClampRect(region) };
+            }
+
+            internal static Rectangle? ResolveTurnBasedObservationRegion(
+                Rectangle? interactionRegion,
+                string observationPolicy)
+            {
+                if (!string.Equals(
+                        observationPolicy,
+                        "turn_based_interaction",
+                        StringComparison.Ordinal))
+                {
+                    return interactionRegion;
+                }
+
+                if (interactionRegion is Rectangle persistent &&
+                    persistent.Width > 0 &&
+                    persistent.Height > 0)
+                {
+                    return ClampRect(persistent);
+                }
+
+                var activeWindow = GetActiveWindowRectangle();
+                if (activeWindow is Rectangle active &&
+                    active.Width > 0 &&
+                    active.Height > 0)
+                {
+                    return ClampRect(active);
+                }
+
+                var (screenX, screenY, screenWidth, screenHeight) = GetPrimaryScreen();
+                return new Rectangle(screenX, screenY, screenWidth, screenHeight);
+            }
+
+            internal static Rectangle? InferTurnBasedObservationRegion(
+                ScreenObservationFrame before,
+                ScreenObservationFrame after,
+                Rectangle currentRegion)
+            {
+                if (before.DetailWidth <= 0 ||
+                    before.DetailHeight <= 0 ||
+                    before.DetailWidth != after.DetailWidth ||
+                    before.DetailHeight != after.DetailHeight ||
+                    before.DetailFingerprint.Length != after.DetailFingerprint.Length ||
+                    before.ScreenBounds != after.ScreenBounds)
+                {
+                    return null;
+                }
+
+                currentRegion.Intersect(before.ScreenBounds);
+                if (currentRegion.Width <= 0 || currentRegion.Height <= 0)
+                    return null;
+
+                var detailWidth = before.DetailWidth;
+                var detailHeight = before.DetailHeight;
+                var bounds = before.ScreenBounds;
+                var left = Math.Clamp(
+                    (int)Math.Floor(
+                        (currentRegion.Left - bounds.Left) * detailWidth /
+                        (double)Math.Max(1, bounds.Width)),
+                    0,
+                    detailWidth - 1);
+                var top = Math.Clamp(
+                    (int)Math.Floor(
+                        (currentRegion.Top - bounds.Top) * detailHeight /
+                        (double)Math.Max(1, bounds.Height)),
+                    0,
+                    detailHeight - 1);
+                var right = Math.Clamp(
+                    (int)Math.Ceiling(
+                        (currentRegion.Right - bounds.Left) * detailWidth /
+                        (double)Math.Max(1, bounds.Width)),
+                    left + 1,
+                    detailWidth);
+                var bottom = Math.Clamp(
+                    (int)Math.Ceiling(
+                        (currentRegion.Bottom - bounds.Top) * detailHeight /
+                        (double)Math.Max(1, bounds.Height)),
+                    top + 1,
+                    detailHeight);
+
+                var changed = new bool[detailWidth * detailHeight];
+                var useColor = before.DetailColorFingerprint.Length ==
+                                   detailWidth * detailHeight * 3 &&
+                               after.DetailColorFingerprint.Length ==
+                                   detailWidth * detailHeight * 3;
+                for (var y = top; y < bottom; y++)
+                for (var x = left; x < right; x++)
+                {
+                    var pixel = y * detailWidth + x;
+                    var maximumDifference = Math.Abs(
+                        before.DetailFingerprint[pixel] -
+                        after.DetailFingerprint[pixel]);
+                    if (useColor)
+                    {
+                        var color = pixel * 3;
+                        maximumDifference = Math.Max(
+                            maximumDifference,
+                            Math.Max(
+                                Math.Abs(before.DetailColorFingerprint[color] -
+                                         after.DetailColorFingerprint[color]),
+                                Math.Max(
+                                    Math.Abs(before.DetailColorFingerprint[color + 1] -
+                                             after.DetailColorFingerprint[color + 1]),
+                                    Math.Abs(before.DetailColorFingerprint[color + 2] -
+                                             after.DetailColorFingerprint[color + 2]))));
+                    }
+                    changed[pixel] = maximumDifference >= 12;
+                }
+
+                var regionPixelCount = (right - left) * (bottom - top);
+                var minimumComponentSize = Math.Max(
+                    4,
+                    (int)Math.Ceiling(regionPixelCount * 0.0015));
+                var visited = new bool[changed.Length];
+                var meaningfulComponents = new List<(int Left, int Top, int Right, int Bottom, int Count)>();
+                for (var start = 0; start < changed.Length; start++)
+                {
+                    if (!changed[start] || visited[start])
+                        continue;
+
+                    var startX = start % detailWidth;
+                    var startY = start / detailWidth;
+                    if (startX < left || startX >= right || startY < top || startY >= bottom)
+                        continue;
+
+                    var queue = new Queue<int>();
+                    queue.Enqueue(start);
+                    visited[start] = true;
+                    var componentLeft = startX;
+                    var componentTop = startY;
+                    var componentRight = startX + 1;
+                    var componentBottom = startY + 1;
+                    var count = 0;
+                    while (queue.Count > 0)
+                    {
+                        var current = queue.Dequeue();
+                        var x = current % detailWidth;
+                        var y = current / detailWidth;
+                        count++;
+                        componentLeft = Math.Min(componentLeft, x);
+                        componentTop = Math.Min(componentTop, y);
+                        componentRight = Math.Max(componentRight, x + 1);
+                        componentBottom = Math.Max(componentBottom, y + 1);
+                        for (var dy = -1; dy <= 1; dy++)
+                        for (var dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0)
+                                continue;
+                            var nx = x + dx;
+                            var ny = y + dy;
+                            if (nx < left || nx >= right || ny < top || ny >= bottom)
+                                continue;
+                            var neighbor = ny * detailWidth + nx;
+                            if (!changed[neighbor] || visited[neighbor])
+                                continue;
+                            visited[neighbor] = true;
+                            queue.Enqueue(neighbor);
+                        }
+                    }
+
+                    if (count >= minimumComponentSize)
+                    {
+                        meaningfulComponents.Add((
+                            componentLeft,
+                            componentTop,
+                            componentRight,
+                            componentBottom,
+                            count));
+                    }
+                }
+
+                if (meaningfulComponents.Sum(component => component.Count) <
+                    Math.Max(8, regionPixelCount * 0.004))
+                {
+                    return null;
+                }
+
+                var changedLeft = meaningfulComponents.Min(component => component.Left);
+                var changedTop = meaningfulComponents.Min(component => component.Top);
+                var changedRight = meaningfulComponents.Max(component => component.Right);
+                var changedBottom = meaningfulComponents.Max(component => component.Bottom);
+                var horizontalPadding = Math.Max(2, (right - left) / 40);
+                var verticalPadding = Math.Max(2, (bottom - top) / 40);
+                changedLeft = Math.Max(left, changedLeft - horizontalPadding);
+                changedTop = Math.Max(top, changedTop - verticalPadding);
+                changedRight = Math.Min(right, changedRight + horizontalPadding);
+                changedBottom = Math.Min(bottom, changedBottom + verticalPadding);
+
+                var inferred = Rectangle.FromLTRB(
+                    bounds.Left + (int)Math.Floor(
+                        changedLeft * bounds.Width / (double)detailWidth),
+                    bounds.Top + (int)Math.Floor(
+                        changedTop * bounds.Height / (double)detailHeight),
+                    bounds.Left + (int)Math.Ceiling(
+                        changedRight * bounds.Width / (double)detailWidth),
+                    bounds.Top + (int)Math.Ceiling(
+                        changedBottom * bounds.Height / (double)detailHeight));
+                inferred.Intersect(currentRegion);
+                if (inferred.Width < currentRegion.Width * 0.10 ||
+                    inferred.Height < currentRegion.Height * 0.10)
+                {
+                    return null;
+                }
+
+                var currentArea = (long)currentRegion.Width * currentRegion.Height;
+                var inferredArea = (long)inferred.Width * inferred.Height;
+                var inferredRatio = inferredArea / (double)Math.Max(1, currentArea);
+                return inferredRatio is >= 0.03 and <= 0.80
+                    ? ClampRect(inferred)
+                    : null;
+            }
+
+            internal static bool IsTurnBasedStateInspection(ActionDto action)
+            {
+                if (action.Type != "request_crop")
+                    return false;
+
+                var note = action.Note ?? "";
+                if (Regex.IsMatch(
+                        note,
+                        @"\b(grid|playfield|game area|game state|puzzle|maze|map|canvas|siatk\w*|labirynt\w*|pole gr\w*)\b",
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                {
+                    return true;
+                }
+                if (IsTurnBasedAuxiliaryInspection(action))
+                    return false;
+                return Regex.IsMatch(
+                    note,
+                    @"\b(board|grid|playfield|level|game area|game state|puzzle|maze|map|canvas|plansz\w*|siatk\w*|poziom\w*|stan\w* gr\w*|map\w*|labirynt\w*|pole gr\w*)\b",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
+
+            internal static bool ShouldEstablishTurnBasedInteractionRegion(
+                ActionDto action,
+                bool regionRequired) =>
+                action.Type == "request_crop" &&
+                (IsTurnBasedStateInspection(action) ||
+                 regionRequired && !IsTurnBasedAuxiliaryInspection(action));
+
+            internal static bool IsTurnBasedAuxiliaryInspection(ActionDto action)
+            {
+                if (action.Type != "request_crop")
+                    return false;
+
+                return Regex.IsMatch(
+                    action.Note ?? "",
+                    @"\b(control\w*|button\w*|help\w*|instruction\w*|toolbar\w*|panel\w*|menu\w*|sterow\w*|przycisk\w*|pomoc\w*|instrukcj\w*)\b",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
+
+            internal static bool IsOverlappingTurnInspection(
+                Rectangle persistentRegion,
+                Rectangle requestedRegion)
+            {
+                var intersection = Rectangle.Intersect(
+                    persistentRegion,
+                    requestedRegion);
+                if (intersection.Width <= 0 || intersection.Height <= 0)
+                    return false;
+                var intersectionArea = (long)intersection.Width * intersection.Height;
+                var smallerArea = Math.Min(
+                    (long)persistentRegion.Width * persistentRegion.Height,
+                    (long)requestedRegion.Width * requestedRegion.Height);
+                return smallerArea > 0 &&
+                       intersectionArea / (double)smallerArea >= 0.60;
+            }
+
+            internal static string TurnBasedContextKey(UiPromptContext context) =>
+                $"{context.ActiveProcessName?.Trim().ToLowerInvariant()}|" +
+                context.ActiveWindowTitle?.Trim().ToLowerInvariant();
+
+            internal static bool AllowsStableCanvasDrawBatch(
+                UiPromptContext context,
+                string observationProfile)
+            {
+                if (!MouseEnabled ||
+                    !DirectClickWithoutAim ||
+                    observationProfile is "realtime_interaction" or "turn_based_interaction" or "streaming_output")
+                {
+                    return false;
+                }
+
+                if (string.Equals(
+                        observationProfile,
+                        "local_editing",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                var semantic = $"{context.ActiveProcessName} {context.ActiveWindowTitle} {context.FocusedUiaSummary}";
+                return Regex.IsMatch(
+                    semantic,
+                    @"\b(mspaint|paint|canvas|drawing|sketch|krita|gimp|photoshop|inkscape|płótno|rysunek)\b",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
+
+            internal static bool ShouldDeferFocusedTextStagnation(
+                ResolvedActionSnapshot? previousAction,
+                bool observedNoChange,
+                int priorNoChangeAttempts) =>
+                observedNoChange &&
+                priorNoChangeAttempts == 0 &&
+                previousAction is not null &&
+                IsTextInputAttemptAction(previousAction.Action);
         
             internal static bool IsSafeBatchedAction(ActionDto action)
             {
@@ -1409,7 +5256,7 @@
                 if (action.Type is "open_url" or "launch_app")
                     return AllowHighLevelActions;
         
-                return action.Type is "keys" or "type_text" or "paste_text" or "wait" or "run_command";
+                return action.Type is "keys" or "type_text" or "paste_text" or "wait" or "run_command" or "drag_path";
             }
         
             internal static bool IsHighImpactGoal(string goal)
@@ -1435,7 +5282,9 @@
                 "click" => 180,
                 "double_click" => 250,
                 "drag_drop" => 500,
+                "drag_path" => 250,
                 "keys" => 120,
+                "hold_keys" => 80,
                 "type_text" => 80,
                 "scroll" => 80,
                 "request_crop" => 80,
@@ -1477,6 +5326,27 @@
                     return confidence < VerifyLowConfidenceThreshold;
         
                 return true;
+            }
+
+            internal static string VerificationSkipReason(int step, ActionDto? action)
+            {
+                if (VerifyMode.Equals("off", StringComparison.OrdinalIgnoreCase))
+                    return "verify=off";
+                if (action?.Type == "done" &&
+                    action.Confidence is double doneConfidence &&
+                    doneConfidence >= SkipVerifyConfidenceThreshold &&
+                    step > VerifyEarlySteps)
+                {
+                    return $"verify=auto high-confidence completion " +
+                           $"({doneConfidence:0.00} >= {SkipVerifyConfidenceThreshold:0.00})";
+                }
+                if (action?.Confidence is double confidence &&
+                    confidence >= VerifyLowConfidenceThreshold)
+                {
+                    return $"verify=auto confidence above verification threshold " +
+                           $"({confidence:0.00} >= {VerifyLowConfidenceThreshold:0.00})";
+                }
+                return $"verify={VerifyMode} policy";
             }
         
             internal static bool TryExecuteFastGoal(string goal)

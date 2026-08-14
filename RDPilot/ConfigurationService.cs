@@ -12,14 +12,15 @@
                     : (AllowHighLevelActions || AllowRunCommand ? "real UI + enabled local adapters" : "real UI");
         
                 Console.WriteLine($"Profile: {RunProfile}");
+                Console.WriteLine($"Observation: mode={ObservationMode}; initial={(ObservationMode == "auto" ? "general" : ObservationMode)}; verbose_log={(ObservationLogVerbose ? "on" : "off")}");
                 Console.WriteLine($"Model: {Model}");
                 Console.WriteLine($"QA model: {EffectiveQaModel()}; verify model: {EffectiveVerifyModel()}");
                 Console.WriteLine($"Reasoning effort: control={ReasoningEffortDisplay(Model, ReasoningEffort)}; qa={ReasoningEffortDisplay(EffectiveQaModel(), EffectiveQaReasoningEffort())}; verify={ReasoningEffortDisplay(EffectiveVerifyModel(), EffectiveVerifyReasoningEffort())}; adaptive={(AdaptiveReasoningEffort ? "on" : "off")}");
                 Console.WriteLine($"UI mode: {uiMode}; mouse={(MouseEnabled ? "enabled" : "disabled")}; desktop={(MultiMonitorEnabled ? "virtual multi-monitor" : "primary monitor only")}; post-action delay={UiSettleDelayMs} ms; grid={(GridStepPx > 0 ? $"{GridStepPx}px" : "off")}");
                 Console.WriteLine($"Images: send={ScreenshotSendFormat} max-width={ScreenshotMaxWidthDisplay()} focused-overview={FocusedOverviewMaxWidthDisplay()} qa={QaScreenshotMaxWidthDisplay()} verify={VerifyScreenshotMaxWidthDisplay()} quality={ScreenshotJpegQuality}; crop={CropSendFormat} max-width={CropMaxWidthDisplay()} size={FocusCropSize}px; screen-log={ScreenLogFormat} max-width={ScreenLogMaxWidthDisplay()}; focus_uia={(IncludeFocusUia ? "on" : "off")}; focus crop={(IncludeFocusUiaCrop ? "on" : "off")}; debug images={(DebugImages ? "on" : "off")}");
-                Console.WriteLine($"Output: max_tokens={MaxOutputTokens}; qa_max_tokens={QaMaxOutputTokens}; verify_max_tokens={VerifyMaxOutputTokens}; incomplete_cap_retries={IncompleteMaxOutputRetries}/{IncompleteMaxOutputTokenCap}; verbosity={TextVerbosity}; action_text_chars={MaxActionTextChars}; history_chars={HistoryTailChars}; history_lines={HistoryTailLines}; verify={VerifyMode}; verify_early_steps={VerifyEarlySteps}; verify_low_confidence={VerifyLowConfidenceThreshold:0.##}; skip_verify_confidence={SkipVerifyConfidenceThreshold:0.##}; verify-refresh={(RefreshScreenshotBeforeVerify ? "on" : "off")}; long text paste threshold={ClipboardPasteThreshold}; prompt_cache={(UsePromptCache ? PromptCacheKey ?? "on" : "off")}; previous_response_state={(UsePreviousResponseState ? "on" : "off")}; omit_unchanged_screen={(OmitUnchangedScreenImageWithState ? "on" : "off")}");
-                Console.WriteLine($"Logs: requests={(LogRequests ? (PrettyRequestLogs ? "pretty" : "compact") : "off")}; screens={(LogScreens ? "on" : "state-only")}; retries={OpenAiMaxRetries}; timeout={(OpenAiTimeoutSeconds > 0 ? $"{OpenAiTimeoutSeconds}s" : "infinite")}; batch candidates={(ExecuteMultiActionCandidates ? $"on/{MaxQueuedBatchActions}" : "off")}");
-                Console.WriteLine($"Loop guards: goal_mode={GoalMode}; max_steps={(MaxSteps > 0 ? MaxSteps.ToString() : "unlimited")}; max_wait={(MaxWaitSeconds > 0 ? $"{MaxWaitSeconds}s" : "off")}; stagnation={(MaxStagnationStepsBeforeAbort > 0 ? MaxStagnationStepsBeforeAbort.ToString() : "off")}; repeated_action={(MaxRepeatedActionBeforeAbort > 0 ? MaxRepeatedActionBeforeAbort.ToString() : "off")}; rejected_proposals={(MaxRejectedProposalRepeatsBeforeAbort > 0 ? MaxRejectedProposalRepeatsBeforeAbort.ToString() : "off")}; repeat_cooldown={(ActionRepeatCooldownSteps > 0 ? ActionRepeatCooldownSteps.ToString() : "off")}; proactive_confidence={ProactiveLoopConfidenceThreshold:0.00}; model_failures={(MaxModelFailuresBeforeAbort > 0 ? MaxModelFailuresBeforeAbort.ToString() : "off")}; action_failures={(MaxActionFailuresBeforeAbort > 0 ? MaxActionFailuresBeforeAbort.ToString() : "off")}");
+                Console.WriteLine($"Output: max_tokens={MaxOutputTokens}; qa_max_tokens={QaMaxOutputTokens}; verify_max_tokens={VerifyMaxOutputTokens}; turn_reanalysis_max_tokens={TurnReanalysisMaxOutputTokens}; incomplete_effort_fallback=max->low; no_effort_cap_retries={IncompleteMaxOutputRetries}/{IncompleteMaxOutputTokenCap}; verbosity={TextVerbosity}; action_text_chars={MaxActionTextChars}; history_chars={HistoryTailChars}; history_lines={HistoryTailLines}; verify={VerifyMode}; verify_early_steps={VerifyEarlySteps}; verify_low_confidence={VerifyLowConfidenceThreshold:0.##}; skip_verify_confidence={SkipVerifyConfidenceThreshold:0.##}; verify-refresh={(RefreshScreenshotBeforeVerify ? "on" : "off")}; long text paste threshold={ClipboardPasteThreshold}; prompt_cache={(UsePromptCache ? PromptCacheKey ?? "on" : "off")}; previous_response_state={(UsePreviousResponseState ? "on" : "off")}; reasoning_context={(UsePreviousResponseState ? ControlReasoningContext : "current_turn")}; context_compaction={(UsePreviousResponseState && ControlContextCompactionEnabled ? ControlContextCompactThreshold.ToString() : "off")}; context_fallback_limit={ControlContextFallbackLimit}; omit_unchanged_screen={(OmitUnchangedScreenImageWithState ? "on" : "off")}");
+                Console.WriteLine($"Logs: requests={(LogRequests ? (PrettyRequestLogs ? "pretty" : "compact") : "off")}; screens={(LogScreens ? "on" : "state-only")}; retries={OpenAiMaxRetries}; timeout={(OpenAiTimeoutSeconds > 0 ? $"{OpenAiTimeoutSeconds}s" : "infinite")}; batch candidates={(ExecuteMultiActionCandidates ? $"on/{MaxQueuedBatchActions}" : "off")}; turn_batch_inputs={TurnBasedMaxBatchInputs}");
+                Console.WriteLine($"Loop guards: goal_mode={GoalMode}; max_steps={(MaxSteps > 0 ? MaxSteps.ToString() : "unlimited")}; max_wait={(MaxWaitSeconds > 0 ? $"{MaxWaitSeconds}s" : "off")}; stagnation={(MaxStagnationStepsBeforeAbort > 0 ? MaxStagnationStepsBeforeAbort.ToString() : "off")}; repeated_action={(MaxRepeatedActionBeforeAbort > 0 ? MaxRepeatedActionBeforeAbort.ToString() : "off")}; rejected_proposals={(MaxRejectedProposalRepeatsBeforeAbort > 0 ? MaxRejectedProposalRepeatsBeforeAbort.ToString() : "off")}; inspection_actions={(MaxConsecutiveInspectionActions > 0 ? MaxConsecutiveInspectionActions.ToString() : "unlimited")}; repeat_cooldown={(ActionRepeatCooldownSteps > 0 ? ActionRepeatCooldownSteps.ToString() : "off")}; proactive_confidence={ProactiveLoopConfidenceThreshold:0.00}; model_failures={(MaxModelFailuresBeforeAbort > 0 ? MaxModelFailuresBeforeAbort.ToString() : "off")}; action_failures={(MaxActionFailuresBeforeAbort > 0 ? MaxActionFailuresBeforeAbort.ToString() : "off")}");
                 Console.WriteLine($"Recovery memory: {(RecoveryMemoryEnabled ? $"on; trigger={RecoveryMemoryTriggerSteps}; validate={RecoveryMemoryValidationSteps}; failure_limit={RecoveryMemoryFailureLimit}; active_max={RecoveryMemoryMaxLessons}; quarantine_max={RecoveryMemoryMaxQuarantinedLessons}; context={RecoveryMemoryReservedLessonsPerContext}/{RecoveryMemorySoftMaxLessonsPerContext}; file_max={RecoveryMemoryMaxFileBytes}B; archive={EffectiveRecoveryMemoryArchivePath()} ({RecoveryMemoryArchiveMaxBytes}B x {RecoveryMemoryArchiveRetainedFiles}); prompt={RecoveryMemoryPromptMaxLessons}; progress_verify={(RecoveryProgressVerificationEnabled ? $"on/{RecoveryProgressConfidenceThreshold:0.00}" : "off")}; telemetry={RecoveryTelemetryMaxBytes}B/{RecoveryTelemetryRetainedFiles}; replay_auto_export={(LoopReplayAutoExportEnabled ? EffectiveLoopReplayCorpusPath() : "off")}; path={EffectiveRecoveryMemoryPath()}" : "off")}");
                 Console.WriteLine($"Runtime bounds: semantic_states={RuntimeSemanticStateLimit}; graph_edges={RuntimeGraphEdgeLimit}; recovery_actions={RuntimeRecoveryActionLimit}; cooldowns={RuntimeCooldownEntryLimit}; graph_candidate_ttl={GraphCandidateTtlSteps} steps");
                 Console.WriteLine($"Screen settle: polling={(ScreenPollingEnabled ? $"on initial={ScreenPollInitialDelayMs}ms interval={ScreenPollIntervalMs}ms timeout={ScreenPollTimeoutMs}ms wait_extra={WaitNoChangeExtraMs}ms" : "off")}; sanity={(ScreenSanityChecks ? "on" : "off")}");
@@ -73,6 +74,7 @@
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_OUTPUT_TOKENS"), "MAX_OUTPUT_TOKENS", 1, int.MaxValue, v => MaxOutputTokens = v);
                 ApplyInt(Environment.GetEnvironmentVariable("QA_MAX_OUTPUT_TOKENS"), "QA_MAX_OUTPUT_TOKENS", 1, int.MaxValue, v => QaMaxOutputTokens = v);
                 ApplyInt(Environment.GetEnvironmentVariable("VERIFY_MAX_OUTPUT_TOKENS"), "VERIFY_MAX_OUTPUT_TOKENS", 1, int.MaxValue, v => VerifyMaxOutputTokens = v);
+                ApplyInt(Environment.GetEnvironmentVariable("TURN_REANALYSIS_MAX_OUTPUT_TOKENS"), "TURN_REANALYSIS_MAX_OUTPUT_TOKENS", 1, int.MaxValue, v => TurnReanalysisMaxOutputTokens = v);
                 ApplyInt(Environment.GetEnvironmentVariable("INCOMPLETE_MAX_OUTPUT_RETRIES"), "INCOMPLETE_MAX_OUTPUT_RETRIES", 0, 5, v => IncompleteMaxOutputRetries = v);
                 ApplyInt(Environment.GetEnvironmentVariable("INCOMPLETE_MAX_OUTPUT_TOKEN_CAP"), "INCOMPLETE_MAX_OUTPUT_TOKEN_CAP", 1, int.MaxValue, v => IncompleteMaxOutputTokenCap = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_ACTION_TEXT_CHARS"), "MAX_ACTION_TEXT_CHARS", 256, int.MaxValue, v => MaxActionTextChars = v);
@@ -85,7 +87,10 @@
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_REPEATED_ACTIONS"), "MAX_REPEATED_ACTIONS", 0, int.MaxValue, v => MaxRepeatedActionBeforeAbort = v);
                 ApplyInt(Environment.GetEnvironmentVariable("ACTION_REPEAT_COOLDOWN_STEPS"), "ACTION_REPEAT_COOLDOWN_STEPS", 0, int.MaxValue, v => ActionRepeatCooldownSteps = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_REJECTED_PROPOSAL_REPEATS"), "MAX_REJECTED_PROPOSAL_REPEATS", 0, int.MaxValue, v => MaxRejectedProposalRepeatsBeforeAbort = v);
+                ApplyInt(Environment.GetEnvironmentVariable("MAX_CONSECUTIVE_INSPECTION_ACTIONS"), "MAX_CONSECUTIVE_INSPECTION_ACTIONS", 0, 20, v => MaxConsecutiveInspectionActions = v);
                 ApplyGoalMode(Environment.GetEnvironmentVariable("GOAL_MODE"), "GOAL_MODE");
+                ApplyObservationMode(Environment.GetEnvironmentVariable("OBSERVATION_PROFILE"), "OBSERVATION_PROFILE");
+                ApplyBool(Environment.GetEnvironmentVariable("OBSERVATION_LOG_VERBOSE"), "OBSERVATION_LOG_VERBOSE", v => ObservationLogVerbose = v);
                 ApplyDouble(Environment.GetEnvironmentVariable("SKIP_VERIFY_CONFIDENCE_THRESHOLD"), "SKIP_VERIFY_CONFIDENCE_THRESHOLD", 0.0, 1.0, v => SkipVerifyConfidenceThreshold = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_MODEL_FAILURES"), "MAX_MODEL_FAILURES", 0, int.MaxValue, v => MaxModelFailuresBeforeAbort = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_ACTION_FAILURES"), "MAX_ACTION_FAILURES", 0, int.MaxValue, v => MaxActionFailuresBeforeAbort = v);
@@ -162,6 +167,10 @@
                 ApplyBool(Environment.GetEnvironmentVariable("RESTORE_CONSOLE_AFTER_RUN"), "RESTORE_CONSOLE_AFTER_RUN", v => RestoreConsoleAfterRun = v);
                 ApplyBool(Environment.GetEnvironmentVariable("PROMPT_CACHE"), "PROMPT_CACHE", v => UsePromptCache = v);
                 ApplyBool(Environment.GetEnvironmentVariable("USE_PREVIOUS_RESPONSE_ID"), "USE_PREVIOUS_RESPONSE_ID", v => UsePreviousResponseState = v);
+                ApplyReasoningContext(Environment.GetEnvironmentVariable("CONTROL_REASONING_CONTEXT"), "CONTROL_REASONING_CONTEXT");
+                ApplyBool(Environment.GetEnvironmentVariable("CONTROL_CONTEXT_COMPACTION"), "CONTROL_CONTEXT_COMPACTION", v => ControlContextCompactionEnabled = v);
+                ApplyInt(Environment.GetEnvironmentVariable("CONTROL_CONTEXT_COMPACT_THRESHOLD"), "CONTROL_CONTEXT_COMPACT_THRESHOLD", 1, int.MaxValue, v => ControlContextCompactThreshold = v);
+                ApplyInt(Environment.GetEnvironmentVariable("CONTROL_CONTEXT_FALLBACK_LIMIT"), "CONTROL_CONTEXT_FALLBACK_LIMIT", 1, 20, v => ControlContextFallbackLimit = v);
                 ApplyBool(Environment.GetEnvironmentVariable("OMIT_UNCHANGED_SCREEN_IMAGE"), "OMIT_UNCHANGED_SCREEN_IMAGE", v => OmitUnchangedScreenImageWithState = v);
                 ApplyBool(Environment.GetEnvironmentVariable("INCLUDE_UIA_TARGETS"), "INCLUDE_UIA_TARGETS", v => IncludeUiaTargets = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_UIA_TARGETS"), "MAX_UIA_TARGETS", 0, 100, v => MaxUiaTargets = v);
@@ -175,6 +184,7 @@
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_ARTIFACTS_PER_DIR"), "MAX_ARTIFACTS_PER_DIR", 0, int.MaxValue, v => MaxArtifactsPerDir = v);
                 ApplyBool(Environment.GetEnvironmentVariable("EXECUTE_MULTI_ACTION_CANDIDATES"), "EXECUTE_MULTI_ACTION_CANDIDATES", v => ExecuteMultiActionCandidates = v);
                 ApplyInt(Environment.GetEnvironmentVariable("MAX_QUEUED_BATCH_ACTIONS"), "MAX_QUEUED_BATCH_ACTIONS", 0, 20, v => MaxQueuedBatchActions = v);
+                ApplyInt(Environment.GetEnvironmentVariable("TURN_BASED_MAX_BATCH_INPUTS"), "TURN_BASED_MAX_BATCH_INPUTS", 2, 64, v => TurnBasedMaxBatchInputs = v);
                 var envPromptCacheKey = Environment.GetEnvironmentVariable("PROMPT_CACHE_KEY");
                 if (!string.IsNullOrWhiteSpace(envPromptCacheKey))
                     PromptCacheKey = envPromptCacheKey.Trim();
@@ -456,6 +466,16 @@
                         UsePreviousResponseState = false;
                         continue;
                     }
+                    if (arg.Equals("--context-compaction", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ControlContextCompactionEnabled = true;
+                        continue;
+                    }
+                    if (arg.Equals("--no-context-compaction", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ControlContextCompactionEnabled = false;
+                        continue;
+                    }
                     if (arg.Equals("--omit-unchanged-screen", StringComparison.OrdinalIgnoreCase))
                     {
                         OmitUnchangedScreenImageWithState = true;
@@ -534,6 +554,21 @@
                         ApplyGoalMode(goalMode, "--goal-mode");
                         continue;
                     }
+                    if (TryReadOption(args, ref i, "--observation-profile", out var observationProfile))
+                    {
+                        ApplyObservationMode(observationProfile, "--observation-profile");
+                        continue;
+                    }
+                    if (arg.Equals("--observation-log-verbose", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ObservationLogVerbose = true;
+                        continue;
+                    }
+                    if (arg.Equals("--no-observation-log-verbose", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ObservationLogVerbose = false;
+                        continue;
+                    }
                     if (TryReadOption(args, ref i, "--max-wait", out var maxWait))
                     {
                         ApplyInt(maxWait, "--max-wait", 0, int.MaxValue, v => MaxWaitSeconds = v);
@@ -552,6 +587,11 @@
                     if (TryReadOption(args, ref i, "--verify-max-output-tokens", out var verifyMaxOutput))
                     {
                         ApplyInt(verifyMaxOutput, "--verify-max-output-tokens", 1, int.MaxValue, v => VerifyMaxOutputTokens = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--turn-reanalysis-max-output-tokens", out var turnReanalysisMaxOutput))
+                    {
+                        ApplyInt(turnReanalysisMaxOutput, "--turn-reanalysis-max-output-tokens", 1, int.MaxValue, v => TurnReanalysisMaxOutputTokens = v);
                         continue;
                     }
                     if (TryReadOption(args, ref i, "--incomplete-max-output-retries", out var incompleteRetries))
@@ -612,6 +652,11 @@
                     if (TryReadOption(args, ref i, "--max-rejected-proposals", out var maxRejectedProposals))
                     {
                         ApplyInt(maxRejectedProposals, "--max-rejected-proposals", 0, int.MaxValue, v => MaxRejectedProposalRepeatsBeforeAbort = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--max-inspection-actions", out var maxInspectionActions))
+                    {
+                        ApplyInt(maxInspectionActions, "--max-inspection-actions", 0, 20, v => MaxConsecutiveInspectionActions = v);
                         continue;
                     }
                     if (TryReadOption(args, ref i, "--skip-verify-confidence", out var skipVerifyConfidence))
@@ -912,6 +957,11 @@
                         ApplyInt(maxBatchActions, "--max-batch-actions", 0, 20, v => MaxQueuedBatchActions = v);
                         continue;
                     }
+                    if (TryReadOption(args, ref i, "--turn-batch-inputs", out var turnBatchInputs))
+                    {
+                        ApplyInt(turnBatchInputs, "--turn-batch-inputs", 2, 64, v => TurnBasedMaxBatchInputs = v);
+                        continue;
+                    }
                     if (TryReadOption(args, ref i, "--replay-response", out var replayPath))
                     {
                         ReplayResponsePath = replayPath;
@@ -942,6 +992,21 @@
                         PromptCacheKey = string.IsNullOrWhiteSpace(promptCacheKey) ? null : promptCacheKey.Trim();
                         continue;
                     }
+                    if (TryReadOption(args, ref i, "--control-reasoning-context", out var reasoningContext))
+                    {
+                        ApplyReasoningContext(reasoningContext, "--control-reasoning-context");
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--context-compact-threshold", out var compactThreshold))
+                    {
+                        ApplyInt(compactThreshold, "--context-compact-threshold", 1, int.MaxValue, v => ControlContextCompactThreshold = v);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--context-fallback-limit", out var fallbackLimit))
+                    {
+                        ApplyInt(fallbackLimit, "--context-fallback-limit", 1, 20, v => ControlContextFallbackLimit = v);
+                        continue;
+                    }
         
                     if (arg.StartsWith("--", StringComparison.Ordinal))
                     {
@@ -968,7 +1033,8 @@
                     IncludeUiaTargets = false;
                 MaxSteps = Math.Max(0, MaxSteps);
                 MaxActionTextChars = Math.Max(256, MaxActionTextChars);
-                IncompleteMaxOutputTokenCap = Math.Max(MaxOutputTokens, IncompleteMaxOutputTokenCap);
+                TurnReanalysisMaxOutputTokens = Math.Max(MaxOutputTokens, TurnReanalysisMaxOutputTokens);
+                IncompleteMaxOutputTokenCap = Math.Max(TurnReanalysisMaxOutputTokens, IncompleteMaxOutputTokenCap);
                 RecoveryMemoryTriggerSteps = Math.Max(1, RecoveryMemoryTriggerSteps);
                 RecoveryMemoryValidationSteps = Math.Max(1, RecoveryMemoryValidationSteps);
                 RecoveryMemoryMaxLessons = Math.Max(1, RecoveryMemoryMaxLessons);
@@ -996,6 +1062,13 @@
                            normalizedGoalMode is "auto" or "finite" or "continuous"
                     ? normalizedGoalMode
                     : "auto";
+                ObservationMode = NormalizeObservationMode(ObservationMode) is var normalizedObservationMode &&
+                                  IsAllowedObservationMode(normalizedObservationMode)
+                    ? normalizedObservationMode
+                    : "auto";
+                ControlReasoningContext = NormalizeReasoningContext(ControlReasoningContext);
+                ControlContextCompactThreshold = Math.Max(1, ControlContextCompactThreshold);
+                ControlContextFallbackLimit = Math.Clamp(ControlContextFallbackLimit, 1, 20);
             }
         
             internal static void ApplyCliProfileArgs(string[] args)
@@ -1081,6 +1154,7 @@
                     if (TryGetInt(root, "maxOutputTokens", out var maxOutput)) MaxOutputTokens = Math.Max(1, maxOutput);
                     if (TryGetInt(root, "qaMaxOutputTokens", out var qaMaxOutput)) QaMaxOutputTokens = Math.Max(1, qaMaxOutput);
                     if (TryGetInt(root, "verifyMaxOutputTokens", out var verifyMaxOutput)) VerifyMaxOutputTokens = Math.Max(1, verifyMaxOutput);
+                    if (TryGetInt(root, "turnReanalysisMaxOutputTokens", out var turnReanalysisMaxOutput)) TurnReanalysisMaxOutputTokens = Math.Max(1, turnReanalysisMaxOutput);
                     if (TryGetInt(root, "incompleteMaxOutputRetries", out var incompleteRetries)) IncompleteMaxOutputRetries = Math.Clamp(incompleteRetries, 0, 5);
                     if (TryGetInt(root, "incompleteMaxOutputTokenCap", out var incompleteTokenCap)) IncompleteMaxOutputTokenCap = Math.Max(1, incompleteTokenCap);
                     if (TryGetInt(root, "maxActionTextChars", out var maxActionTextChars)) MaxActionTextChars = Math.Max(256, maxActionTextChars);
@@ -1093,10 +1167,13 @@
                     if (TryGetInt(root, "maxRepeatedActions", out var maxRepeated)) MaxRepeatedActionBeforeAbort = Math.Max(0, maxRepeated);
                     if (TryGetInt(root, "actionRepeatCooldownSteps", out var repeatCooldown)) ActionRepeatCooldownSteps = Math.Max(0, repeatCooldown);
                     if (TryGetInt(root, "maxRejectedProposalRepeats", out var maxRejectedProposals)) MaxRejectedProposalRepeatsBeforeAbort = Math.Max(0, maxRejectedProposals);
+                    if (TryGetInt(root, "maxConsecutiveInspectionActions", out var maxInspectionActions)) MaxConsecutiveInspectionActions = Math.Clamp(maxInspectionActions, 0, 20);
                     if (TryGetDouble(root, "skipVerifyConfidenceThreshold", out var skipVerifyConfidence)) SkipVerifyConfidenceThreshold = Math.Clamp(skipVerifyConfidence, 0.0, 1.0);
                     if (TryGetInt(root, "maxModelFailures", out var maxModelFailures)) MaxModelFailuresBeforeAbort = Math.Max(0, maxModelFailures);
                     if (TryGetInt(root, "maxActionFailures", out var maxActionFailures)) MaxActionFailuresBeforeAbort = Math.Max(0, maxActionFailures);
                     if (TryGetString(root, "goalMode", out var goalMode)) ApplyGoalMode(goalMode, path);
+                    if (TryGetString(root, "observationProfile", out var observationProfile)) ApplyObservationMode(observationProfile, path);
+                    if (TryGetBool(root, "observationLogVerbose", out var observationLogVerbose)) ObservationLogVerbose = observationLogVerbose;
                     if (TryGetBool(root, "recoveryMemory", out var recoveryMemory)) RecoveryMemoryEnabled = recoveryMemory;
                     if (TryGetString(root, "recoveryMemoryPath", out var recoveryMemoryPath)) RecoveryMemoryPath = recoveryMemoryPath;
                     if (TryGetInt(root, "recoveryMemoryTriggerSteps", out var recoveryTrigger)) RecoveryMemoryTriggerSteps = Math.Max(1, recoveryTrigger);
@@ -1161,6 +1238,10 @@
                     if (TryGetBool(root, "promptCache", out var promptCache)) UsePromptCache = promptCache;
                     if (TryGetString(root, "promptCacheKey", out var promptCacheKey)) PromptCacheKey = promptCacheKey;
                     if (TryGetBool(root, "usePreviousResponseId", out var previousResponseState)) UsePreviousResponseState = previousResponseState;
+                    if (TryGetString(root, "controlReasoningContext", out var controlReasoningContext)) ApplyReasoningContext(controlReasoningContext, path);
+                    if (TryGetBool(root, "controlContextCompaction", out var contextCompaction)) ControlContextCompactionEnabled = contextCompaction;
+                    if (TryGetInt(root, "controlContextCompactThreshold", out var contextCompactThreshold)) ControlContextCompactThreshold = Math.Max(1, contextCompactThreshold);
+                    if (TryGetInt(root, "controlContextFallbackLimit", out var contextFallbackLimit)) ControlContextFallbackLimit = Math.Clamp(contextFallbackLimit, 1, 20);
                     if (TryGetBool(root, "omitUnchangedScreenImage", out var omitUnchangedScreen)) OmitUnchangedScreenImageWithState = omitUnchangedScreen;
                     if (TryGetBool(root, "includeUiaTargets", out var includeUia)) IncludeUiaTargets = includeUia;
                     if (TryGetInt(root, "maxUiaTargets", out var maxUia)) MaxUiaTargets = Math.Clamp(maxUia, 0, 100);
@@ -1173,6 +1254,7 @@
                     if (TryGetBool(root, "reuseUiaTargetsWhenScreenUnchanged", out var reuseUia)) ReuseUiaTargetsWhenScreenUnchanged = reuseUia;
                     if (TryGetBool(root, "executeMultiActionCandidates", out var executeCandidates)) ExecuteMultiActionCandidates = executeCandidates;
                     if (TryGetInt(root, "maxQueuedBatchActions", out var maxQueued)) MaxQueuedBatchActions = Math.Clamp(maxQueued, 0, 20);
+                    if (TryGetInt(root, "turnBasedMaxBatchInputs", out var turnBatchInputs)) TurnBasedMaxBatchInputs = Math.Clamp(turnBatchInputs, 2, 64);
                     if (TryGetBool(root, "logRequests", out var logRequests)) LogRequests = logRequests;
                     if (TryGetBool(root, "prettyRequestLogs", out var prettyRequestLogs)) PrettyRequestLogs = prettyRequestLogs;
                     if (TryGetBool(root, "logScreens", out var logScreens)) LogScreens = logScreens;
@@ -1236,6 +1318,7 @@
                 nameof(MaxOutputTokens),
                 nameof(QaMaxOutputTokens),
                 nameof(VerifyMaxOutputTokens),
+                nameof(TurnReanalysisMaxOutputTokens),
                 nameof(QaScreenshotMaxWidth),
                 nameof(VerifyScreenshotMaxWidth),
                 nameof(TextVerbosity),
@@ -1642,6 +1725,35 @@
                     Console.Error.WriteLine($"Invalid text verbosity '{value}' from {source}; expected low, medium, or high.");
             }
 
+            internal static void ApplyReasoningContext(string? value, string source)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return;
+
+                var normalized = value.Trim().ToLowerInvariant() switch
+                {
+                    "current-turn" or "currentturn" or "current_turn" => "current_turn",
+                    "all-turns" or "allturns" or "all_turns" => "all_turns",
+                    "auto" => "auto",
+                    _ => null
+                };
+                if (normalized is null)
+                    Console.Error.WriteLine($"Invalid control reasoning context '{value}' from {source}; expected auto, current_turn, or all_turns.");
+                else
+                    ControlReasoningContext = normalized;
+            }
+
+            internal static string NormalizeReasoningContext(string? value) =>
+                value?.Trim().ToLowerInvariant() switch
+                {
+                    "current-turn" or "currentturn" => "current_turn",
+                    "all-turns" or "allturns" => "all_turns",
+                    "auto" => "auto",
+                    "current_turn" => "current_turn",
+                    "all_turns" => "all_turns",
+                    _ => "all_turns"
+                };
+
             internal static void ApplyGoalMode(string? value, string source)
             {
                 if (string.IsNullOrWhiteSpace(value))
@@ -1656,6 +1768,25 @@
 
             static string NormalizeGoalMode(string? value) =>
                 value?.Trim().ToLowerInvariant() ?? "auto";
+
+            internal static void ApplyObservationMode(string? value, string source)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return;
+
+                var normalized = NormalizeObservationMode(value);
+                if (IsAllowedObservationMode(normalized))
+                    ObservationMode = normalized;
+                else
+                    Console.Error.WriteLine($"Invalid observation profile '{value}' from {source}; expected auto, general, static_ui, local_editing, event_driven, streaming_output, turn_based_interaction, or realtime_interaction.");
+            }
+
+            static string NormalizeObservationMode(string? value) =>
+                value?.Trim().ToLowerInvariant().Replace('-', '_') ?? "auto";
+
+            static bool IsAllowedObservationMode(string value) =>
+                value is "auto" or "general" or "static_ui" or "local_editing" or
+                    "event_driven" or "streaming_output" or "turn_based_interaction" or "realtime_interaction";
         
             internal static void ApplyImageFormat(string? value, string source)
             {

@@ -42,6 +42,7 @@
             int stagnationSteps,
             int repeatCount,
             double lastDelta,
+            ObservationAssessment? observationAssessment,
             byte[] shotFingerprint,
             byte[] activeWindowFingerprint,
             ResolvedActionSnapshot? previousAction,
@@ -63,7 +64,10 @@
                 (double.IsNaN(lastDelta) && !planningLoopDetected))
                 return episode;
 
-            var proactivePattern = lastDelta < NoChangeThreshold &&
+            var noProgress = observationAssessment is not null
+                ? observationAssessment.GoalProgress == GoalProgressState.NoProgress
+                : lastDelta < NoChangeThreshold;
+            var proactivePattern = noProgress &&
                                    HasEmergingLoopPattern(recentActions, previousAction);
             var proactiveVisualCycle = loopAssessment.IsLoop;
             var triggerReached = stagnationSteps >= Math.Max(1, RecoveryMemoryTriggerSteps) ||
@@ -156,7 +160,7 @@
                     return episode;
                 }
 
-                episode.ValidationObservedSemanticProgress |= IsMeaningfulStateTransition(
+                var meaningfulValidationTransition = IsMeaningfulStateTransition(
                     episode.TriggerContext,
                     episode.TriggerFingerprint,
                     episode.TriggerActiveWindowFingerprint,
@@ -164,6 +168,11 @@
                     shotFingerprint,
                     activeWindowFingerprint,
                     lastDelta);
+                episode.ValidationObservedSemanticProgress |=
+                    IsRecoveryValidationProgress(
+                        previousAction,
+                        observationAssessment,
+                        meaningfulValidationTransition);
                 episode.ValidationRemaining--;
                 if (episode.ValidationRemaining > 0)
                     return episode;
@@ -183,17 +192,19 @@
             }
 
             var visibleProgress = stagnationSteps == 0 &&
-                                  lastDelta >= NoChangeThreshold &&
                                   previousAction != null &&
                                   !IsLocalObservationAction(previousAction.Action) &&
-                                  IsMeaningfulStateTransition(
-                                      episode.TriggerContext,
-                                      episode.TriggerFingerprint,
-                                      episode.TriggerActiveWindowFingerprint,
-                                      context,
-                                      shotFingerprint,
-                                      activeWindowFingerprint,
-                                      lastDelta);
+                                  (observationAssessment?.IsProgress == true ||
+                                   observationAssessment is null &&
+                                   lastDelta >= NoChangeThreshold &&
+                                   IsMeaningfulStateTransition(
+                                       episode.TriggerContext,
+                                       episode.TriggerFingerprint,
+                                       episode.TriggerActiveWindowFingerprint,
+                                       context,
+                                       shotFingerprint,
+                                       activeWindowFingerprint,
+                                       lastDelta));
             if (!visibleProgress)
             {
                 if (episode.AppliedLessonId is not null)
@@ -292,10 +303,19 @@
                 activeWindowFingerprint);
             episode.IsValidating = true;
             episode.ValidationRemaining = Math.Max(1, RecoveryMemoryValidationSteps);
-            episode.ValidationObservedSemanticProgress = true;
+            episode.ValidationObservedSemanticProgress = false;
             Console.WriteLine($"[memory] candidate recovery found; validating for {episode.ValidationRemaining} additional step(s).");
             return episode;
         }
+
+        internal static bool IsRecoveryValidationProgress(
+            ResolvedActionSnapshot? previousAction,
+            ObservationAssessment? observationAssessment,
+            bool meaningfulStateTransition) =>
+            previousAction is not null &&
+            !IsLocalObservationAction(previousAction.Action) &&
+            (observationAssessment?.IsProgress == true ||
+             observationAssessment is null && meaningfulStateTransition);
 
         internal static bool IsVerifiedRecoveryProgress(
             RecoveryProgressDto? assessment) =>
@@ -730,11 +750,13 @@
             {
                 "click" or "double_click" => "click",
                 "drag_drop" => "drag_drop",
+                "drag_path" => "path_gesture",
                 "move" => "move",
                 "aim" or "point" or "request_crop" => "observe",
                 "focus_uia" or "click_uia" => "uia",
                 "type_text" or "paste_text" => "text_input",
                 "keys" => "keys",
+                "hold_keys" => "key_hold",
                 "scroll" => "scroll",
                 "wait" => "wait",
                 var type => type
@@ -764,6 +786,11 @@
 
             if (currentFamily == "drag_drop")
                 return PlacementOrDragLoop;
+
+            if (currentFamily == "path_gesture")
+                return previousAction?.Action.GestureKind is "draw" or "lasso"
+                    ? RasterCanvasPointerLoop
+                    : PointerRegionLoop;
 
             var visualContext = $"{context.ActiveWindowTitle} {context.FocusedUiaSummary}".ToLowerInvariant();
             if (currentFamily is "click" or "move" &&
@@ -1056,8 +1083,10 @@
                 "move" => "move the pointer first and inspect the hover or placement state",
                 "click" => "click once only after the target state is visibly valid",
                 "drag_drop" => "drag the current source object to the semantically correct destination",
+                "path_gesture" => $"perform the bounded {action.GestureKind ?? "pointer"} path once on the intended surface",
                 "uia" => "use the matching current UI Automation target",
                 "keys" => $"use the keyboard action [{string.Join("+", action.Keys ?? [])}]",
+                "key_hold" => $"hold [{string.Join("+", action.Keys ?? [])}] for {EffectiveKeyHoldDurationMs(action)} ms",
                 "scroll" => (action.ScrollDy ?? 0) >= 0 ? "scroll down to a different visible route" : "scroll up to a different visible route",
                 "text_input" => "establish editable focus, then enter the text once",
                 "wait" => "wait for the visible operation to settle",
@@ -1071,8 +1100,10 @@
             {
                 "click" => "target is visible, enabled, and unambiguous",
                 "drag_drop" => "source and destination are both visible; source is draggable",
+                "path_gesture" => "the intended gesture surface and starting point are visible",
                 "text_input" => "editable control has focus",
                 "keys" => "the intended window/control has focus",
+                "key_hold" => "the realtime target has focus and is ready for held input",
                 "uia" => "a semantically matching UIA target exists",
                 "scroll" => "the intended scroll container is active",
                 _ => "current visible state matches the learned context"
@@ -1083,8 +1114,10 @@
             {
                 "click" => "target state or active view changes",
                 "drag_drop" => "source leaves its old location and destination accepts it",
+                "path_gesture" => "the expected local path or realtime response appears",
                 "text_input" => "text appears once in the intended control",
                 "keys" => "focus or application state changes as intended",
+                "key_hold" => "the application reacts during the bounded hold and all keys are released",
                 "scroll" => "new content becomes visible",
                 "observe" => "ambiguity is reduced without mutating the UI",
                 _ => "the loop state is left and visible goal progress persists"
@@ -1098,8 +1131,10 @@
             {
                 "observe" or "move" => 0.25,
                 "click" or "uia" or "keys" or "scroll" => 0.5,
+                "key_hold" => 0.65,
                 "text_input" => 0.7,
                 "drag_drop" => 0.8,
+                "path_gesture" => 0.8,
                 "wait" => 0.9,
                 "open_url" or "launch_app" => 1.2,
                 "run_command" => 1.5,
@@ -1111,9 +1146,11 @@
             ActionFamily(action) switch
             {
                 "keys" => string.Join("+", action.Keys ?? []).ToLowerInvariant(),
+                "key_hold" => $"{string.Join("+", action.Keys ?? []).ToLowerInvariant()}:{EffectiveKeyHoldDurationMs(action)}ms",
                 "scroll" => (action.ScrollDy ?? 0) >= 0 ? "down" : "up",
                 "text_input" => string.IsNullOrEmpty(action.Text) ? "" : $"text-length:{Math.Min(32, action.Text.Length / 8)}",
                 "drag_drop" => action.Button?.ToLowerInvariant() ?? "left",
+                "path_gesture" => $"{action.GestureKind ?? "other"}:{action.Path?.Length ?? 0}-points",
                 "click" => action.Button?.ToLowerInvariant() ?? "left",
                 _ => ""
             };
@@ -1262,7 +1299,7 @@
 
             var hasExplicitEnd = Regex.IsMatch(
                 normalized,
-                @"\b(until|aż|dopóki|complete|finish|ukończ|zakończ|wygraj|win|one\s+round|jedną\s+rundę|level\s+\d+|poziom\s+\d+|when\s+done|gdy\s+zakończ|do\s+godziny|przez\s+\d+|for\s+\d+\s+(?:seconds?|minutes?|hours?)|\d+\s+(?:times?|razy|iterations?|iteracj\p{L}*))\b",
+                @"\b(until|aż|dopóki|complete\w*|finish\w*|ukończ\p{L}*|zakończ\p{L}*|wygraj\p{L}*|win|winning|won|one\s+round|jedną\s+rundę|first\s+level|pierwsz\p{L}*\s+poziom\p{L}*|level\s+\d+|poziom\s+\d+|when\s+done|gdy\s+zakończ\p{L}*|do\s+godziny|przez\s+\d+|for\s+\d+\s+(?:seconds?|minutes?|hours?)|\d+\s+(?:times?|razy|iterations?|iteracj\p{L}*))\b",
                 RegexOptions.CultureInvariant);
             if (hasExplicitEnd)
                 return "finite";
@@ -1394,8 +1431,13 @@
             var family = ActionFamily(previousAction?.Action ?? actions.LastOrDefault()?.Action);
             if (IsTerminalProcess(process))
                 return "terminal";
-            if (family == "drag_drop" || actions.Any(HasPlacementIntent))
+            if (family == "drag_drop" ||
+                family != "path_gesture" && actions.Any(HasPlacementIntent))
                 return "placement";
+            if (family == "path_gesture")
+                return previousAction?.Action.GestureKind is "draw" or "lasso"
+                    ? "raster-canvas"
+                    : "gesture-surface";
             if (family == "uia")
                 return "uia";
             var visualContext = $"{context.ActiveWindowTitle} {context.FocusedUiaSummary}".ToLowerInvariant();
@@ -1405,7 +1447,7 @@
                 return "browser";
             if (family is "click" or "move" or "scroll")
                 return "pointer-ui";
-            if (family is "keys" or "text_input")
+            if (family is "keys" or "key_hold" or "text_input")
                 return "keyboard-ui";
             return "generic-ui";
         }

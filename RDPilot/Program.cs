@@ -53,14 +53,21 @@ internal static partial class RDPilotApplication
 
     // Stagnation / verification
     const double NoChangeThreshold = 0.005;             // 0..1 (avg pixel diff after downsampling)
+    static string ObservationMode = "auto";             // auto | general | static_ui | local_editing | event_driven | streaming_output | realtime_interaction
+    static bool ObservationLogVerbose = false;
+    const int MaxGesturePathPoints = 128;
+    const int MaxGestureDurationMs = 5_000;
+    const int MaxHeldKeys = 4;
+    const int MaxKeyHoldDurationMs = 5_000;
 
     // Speed/quality profile
     static string RunProfile = "custom";                // custom | fast | balanced | quality
-    static int MaxOutputTokens = 4000;
-    static int QaMaxOutputTokens = 2500;
-    static int VerifyMaxOutputTokens = 1500;
+    static int MaxOutputTokens = 10000;
+    static int QaMaxOutputTokens = 4000;
+    static int VerifyMaxOutputTokens = 6000;
+    static int TurnReanalysisMaxOutputTokens = 10000;
     static int IncompleteMaxOutputRetries = 2;
-    static int IncompleteMaxOutputTokenCap = 8000;
+    static int IncompleteMaxOutputTokenCap = 16000;
     static int MaxActionTextChars = 3000;
     static int QaScreenshotMaxWidth = 1024;
     static int VerifyScreenshotMaxWidth = 1024;
@@ -147,7 +154,11 @@ internal static partial class RDPilotApplication
     static string? RequestReasoningEffortOverride = null;
     static bool UsePromptCache = true;
     static string? PromptCacheKey = "rdpilot-control-v1";
-    static bool UsePreviousResponseState = false;
+    static bool UsePreviousResponseState = true;
+    static string ControlReasoningContext = "all_turns";
+    static bool ControlContextCompactionEnabled = true;
+    static int ControlContextCompactThreshold = 700_000;
+    static int ControlContextFallbackLimit = 3;
     static bool OmitUnchangedScreenImageWithState = false;
     static bool IncludeUiaTargets = true;
     static int MaxUiaTargets = 20;
@@ -163,8 +174,11 @@ internal static partial class RDPilotApplication
     static int MaxArtifactsPerDir = 500;
     static List<UiaTarget> CurrentUiaTargets = [];
     static ScreenCoordinateMapper CurrentScreenMap = ScreenCoordinateMapper.Create(1, 1, 1, 1);
-    static bool ExecuteMultiActionCandidates = false;
+    static bool ExecuteMultiActionCandidates = true;
     static int MaxQueuedBatchActions = 4;
+    static int MaxBatchedGesturePoints = 180;
+    static int MaxBatchedGestureDurationMs = 12_000;
+    static int MaxConsecutiveInspectionActions = 2;
     static readonly Queue<ActionDto> PendingSafeActions = new();
     static string? ReplayResponsePath = null;
     static string? ReplayRequestPath = null;
@@ -179,6 +193,12 @@ internal static partial class RDPilotApplication
     static long RunCachedTokens = 0;
     static long RunOutputTokens = 0;
     static long RunReasoningTokens = 0;
+    static int RunEarlyAcceptedControlStreams = 0;
+    static int RunControlContextTurns = 0;
+    static int RunControlContextRestarts = 0;
+    static int RunControlContextFallbacks = 0;
+    static int RunControlContextCompactions = 0;
+    static int RunControlCompactionFallbacks = 0;
     static int RunScreenshotCount = 0;
     static TimeSpan RunScreenshotElapsed = TimeSpan.Zero;
     static int RunScreenProbeCount = 0;
@@ -208,7 +228,7 @@ internal static partial class RDPilotApplication
     {
         "open_url", "launch_app", "run_command",
         "paste_text", "focus_uia", "click_uia",
-        "move", "click", "double_click", "drag_drop", "keys", "type_text", "scroll",
+        "move", "click", "double_click", "drag_drop", "drag_path", "keys", "hold_keys", "type_text", "scroll",
         "request_crop", "point", "aim", "wait", "done"
     };
     static readonly HashSet<string> ReportedSanityWarnings = new(StringComparer.OrdinalIgnoreCase);
@@ -217,6 +237,7 @@ internal static partial class RDPilotApplication
     {
         Console.OutputEncoding = Encoding.UTF8;
         ConsoleTheme.Enable();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => ReleaseAllHeldKeys();
 
         ApplyEnvironmentConfig();
         string? pending = ApplyCliArgs(args);
@@ -287,7 +308,11 @@ internal static partial class RDPilotApplication
         try { SetProcessDpiAwarenessContext((nint)(-4)); } catch { /* best effort */ }
 
         PrintStartupSummary();
-        Console.WriteLine("Enter a task or question. Use '/ask ' for Q&A and '/exit' to quit.\n");
+        var promptHistory = PromptHistoryService.Load();
+        Console.WriteLine(
+            "Enter a task or question. Use Up/Down for prompt history, '/ask ' for Q&A, and '/exit' to quit.");
+        Console.WriteLine(
+            $"Prompt history: {PromptHistoryService.EffectivePath()} ({promptHistory.Count} entries)\n");
 
         while (true)
         {
@@ -300,12 +325,15 @@ internal static partial class RDPilotApplication
             }
             else
             {
-                Console.Write("Command/Question: ");
-                goal = Console.ReadLine() ?? "";
+                goal = PromptHistoryService.ReadLine(
+                    "Command/Question: ",
+                    promptHistory);
             }
 
             if (string.IsNullOrWhiteSpace(goal) || goal.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
                 break;
+
+            PromptHistoryService.Remember(promptHistory, goal);
 
             if (IsQuestion(goal))
             {

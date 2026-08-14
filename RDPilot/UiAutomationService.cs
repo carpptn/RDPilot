@@ -135,6 +135,47 @@
                     return null;
                 }
             }
+
+            internal static bool TryRestoreForegroundWindow(IntPtr hWnd)
+            {
+                if (hWnd == IntPtr.Zero || !IsWindow(hWnd))
+                    return false;
+                if (GetForegroundWindow() == hWnd)
+                    return true;
+
+                if (IsIconic(hWnd))
+                    ShowWindowAsync(hWnd, 9);
+
+                var foreground = GetForegroundWindow();
+                var currentThread = GetCurrentThreadId();
+                var foregroundThread = foreground == IntPtr.Zero
+                    ? 0
+                    : GetWindowThreadProcessId(foreground, out _);
+                var targetThread = GetWindowThreadProcessId(hWnd, out _);
+                var attachedForeground = foregroundThread != 0 &&
+                                         foregroundThread != currentThread &&
+                                         AttachThreadInput(currentThread, foregroundThread, true);
+                var attachedTarget = targetThread != 0 &&
+                                     targetThread != currentThread &&
+                                     targetThread != foregroundThread &&
+                                     AttachThreadInput(currentThread, targetThread, true);
+                try
+                {
+                    BringWindowToTop(hWnd);
+                    SetForegroundWindow(hWnd);
+                    SetFocus(hWnd);
+                }
+                finally
+                {
+                    if (attachedTarget)
+                        AttachThreadInput(currentThread, targetThread, false);
+                    if (attachedForeground)
+                        AttachThreadInput(currentThread, foregroundThread, false);
+                }
+
+                Thread.Sleep(60);
+                return GetForegroundWindow() == hWnd;
+            }
         
             internal static string? DetectBlockingPromptHint(string title, string processName, string? focusedUiaSummary)
             {
@@ -512,6 +553,14 @@
             [DllImport("user32.dll", SetLastError = true)]
             private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
             [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+            [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hWnd);
+            [DllImport("user32.dll")] private static extern IntPtr SetFocus(IntPtr hWnd);
+            [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hWnd);
+            [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+            [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+            [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+            [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
             [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
             [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
         

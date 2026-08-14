@@ -10,8 +10,13 @@
             internal static (string dataUrl, string? savedPath, int screenW, int screenH, int imageW, int imageH,
                     string? focusDataUrl, Rectangle? focusRect,
                     Rectangle? focusUiaRect, string? focusUiaSummary, string? focusUiaDataUrl, string? focusUiaImagePath,
-                    byte[] deltaFingerprint, byte[] activeWindowFingerprint)
-                ScreenshotToDataUrl(string saveDir, string commandId, int step, Rectangle? explicitFocusRect)
+                    byte[] deltaFingerprint, byte[] activeWindowFingerprint, ScreenObservationFrame observationFrame)
+                ScreenshotToDataUrl(
+                    string saveDir,
+                    string commandId,
+                    int step,
+                    Rectangle? explicitFocusRect,
+                    bool includeObservationDetail = false)
             {
                 var screenshotSw = Stopwatch.StartNew();
                 var (vx, vy, vw, vh) = GetPrimaryScreen();
@@ -37,6 +42,31 @@
                     vx,
                     vy,
                     deltaFingerprint);
+                var detailWidth = 0;
+                var detailHeight = 0;
+                var detailFingerprints = (Grayscale: Array.Empty<byte>(), Color: Array.Empty<byte>());
+                if (includeObservationDetail)
+                {
+                    var detailScale = Math.Min(
+                        1.0,
+                        Math.Min(640.0 / Math.Max(1, vw), 360.0 / Math.Max(1, vh)));
+                    detailWidth = Math.Max(1, (int)Math.Round(vw * detailScale));
+                    detailHeight = Math.Max(1, (int)Math.Round(vh * detailScale));
+                    detailFingerprints = BuildDetailFingerprints(
+                        bmp,
+                        detailWidth,
+                        detailHeight);
+                }
+                var observationFrame = new ScreenObservationFrame(
+                    deltaFingerprint,
+                    activeWindowFingerprint,
+                    detailFingerprints.Grayscale,
+                    detailWidth,
+                    detailHeight,
+                    new Rectangle(vx, vy, vw, vh))
+                {
+                    DetailColorFingerprint = detailFingerprints.Color
+                };
                 ReportScreenshotSanity(deltaFingerprint, vw, vh);
         
                 using (var g = Graphics.FromImage(bmp))
@@ -131,7 +161,7 @@
                 screenshotSw.Stop();
                 RunScreenshotCount++;
                 RunScreenshotElapsed += screenshotSw.Elapsed;
-                return (fullDataUrl, fullPath, vw, vh, fullImageW, fullImageH, focusUrl, rect, focusUiaRectAbs, focusUiaSummary, focusUiaDataUrl, focusUiaPath, deltaFingerprint, activeWindowFingerprint);
+                return (fullDataUrl, fullPath, vw, vh, fullImageW, fullImageH, focusUrl, rect, focusUiaRectAbs, focusUiaSummary, focusUiaDataUrl, focusUiaPath, deltaFingerprint, activeWindowFingerprint, observationFrame);
             }
 
             internal static byte[] BuildActiveWindowFingerprint(
@@ -157,6 +187,92 @@
 
                 using var crop = screenshot.Clone(local, PixelFormat.Format24bppRgb);
                 return BuildImageFingerprint(crop);
+            }
+
+            internal static ScreenObservationFrame CaptureObservationFrameProbe(
+                bool includeDetail = false)
+            {
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    var (vx, vy, vw, vh) = GetPrimaryScreen();
+                    using var bmp = new Bitmap(vw, vh, PixelFormat.Format24bppRgb);
+                    using (var graphics = Graphics.FromImage(bmp))
+                        graphics.CopyFromScreen(vx, vy, 0, 0, new Size(vw, vh), CopyPixelOperation.SourceCopy);
+
+                    var global = BuildImageFingerprint(bmp);
+                    var active = BuildActiveWindowFingerprint(bmp, vx, vy, global);
+                    var detailWidth = 0;
+                    var detailHeight = 0;
+                    var detailFingerprints = (Grayscale: Array.Empty<byte>(), Color: Array.Empty<byte>());
+                    if (includeDetail)
+                    {
+                        var scale = Math.Min(
+                            1.0,
+                            Math.Min(640.0 / Math.Max(1, vw), 360.0 / Math.Max(1, vh)));
+                        detailWidth = Math.Max(1, (int)Math.Round(vw * scale));
+                        detailHeight = Math.Max(1, (int)Math.Round(vh * scale));
+                        detailFingerprints = BuildDetailFingerprints(
+                            bmp,
+                            detailWidth,
+                            detailHeight);
+                    }
+                    return new ScreenObservationFrame(
+                        global,
+                        active,
+                        detailFingerprints.Grayscale,
+                        detailWidth,
+                        detailHeight,
+                        new Rectangle(vx, vy, vw, vh))
+                    {
+                        DetailColorFingerprint = detailFingerprints.Color
+                    };
+                }
+                finally
+                {
+                    sw.Stop();
+                    RunScreenProbeCount++;
+                    RunScreenProbeElapsed += sw.Elapsed;
+                }
+            }
+
+            internal static byte[] CaptureRegionFingerprintProbe(Rectangle region)
+            {
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    var clamped = ClampRect(region);
+                    using var bitmap = new Bitmap(
+                        clamped.Width,
+                        clamped.Height,
+                        PixelFormat.Format24bppRgb);
+                    using (var graphics = Graphics.FromImage(bitmap))
+                    {
+                        graphics.CopyFromScreen(
+                            clamped.Left,
+                            clamped.Top,
+                            0,
+                            0,
+                            clamped.Size,
+                            CopyPixelOperation.SourceCopy);
+                    }
+
+                    const int maximumSide = 192;
+                    var scale = Math.Min(
+                        1.0,
+                        Math.Min(
+                            maximumSide / (double)Math.Max(1, clamped.Width),
+                            maximumSide / (double)Math.Max(1, clamped.Height)));
+                    var width = Math.Max(1, (int)Math.Round(clamped.Width * scale));
+                    var height = Math.Max(1, (int)Math.Round(clamped.Height * scale));
+                    return BuildDetailFingerprints(bitmap, width, height).Color;
+                }
+                finally
+                {
+                    sw.Stop();
+                    RunScreenProbeCount++;
+                    RunScreenProbeElapsed += sw.Elapsed;
+                }
             }
         
             internal static (int W, int H) FullScreenshotRequestImageSize(Bitmap bmp, bool hasFocusCrop)
@@ -324,6 +440,127 @@
         
             internal static string EncodeCropBitmapToDataUrl(Bitmap bmp) =>
                 EncodeBitmapToDataUrl(bmp, MaxCropSendWidth, CropSendFormat, ScreenshotJpegQuality);
+
+            internal static bool TryBuildTurnRegionEvidenceImage(
+                string fullScreenDataUrl,
+                Rectangle screenRegion,
+                Rectangle screenBounds,
+                string saveDir,
+                string commandId,
+                int step,
+                out string? dataUrl,
+                out string? imagePath)
+            {
+                dataUrl = null;
+                imagePath = null;
+                try
+                {
+                    screenRegion.Intersect(screenBounds);
+                    if (screenRegion.Width <= 0 || screenRegion.Height <= 0)
+                        return false;
+
+                    var normalizedRegion = new RectangleF(
+                        (screenRegion.Left - screenBounds.Left) /
+                        (float)Math.Max(1, screenBounds.Width),
+                        (screenRegion.Top - screenBounds.Top) /
+                        (float)Math.Max(1, screenBounds.Height),
+                        screenRegion.Width /
+                        (float)Math.Max(1, screenBounds.Width),
+                        screenRegion.Height /
+                        (float)Math.Max(1, screenBounds.Height));
+                    using var source = DecodeDataUrlBitmap(fullScreenDataUrl);
+                    using var crop = CropNormalizedRegion(source, normalizedRegion);
+                    imagePath = LogScreens
+                        ? ScreenLogPath(saveDir, $"{commandId}_{step}_turn_region")
+                        : null;
+                    if (imagePath is not null)
+                        SaveScreenLogImage(crop, imagePath);
+                    dataUrl = EncodeCropBitmapToDataUrl(crop);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"[turn-memory] could not build automatic interaction-region image: {ex.Message}");
+                    dataUrl = null;
+                    imagePath = null;
+                    return false;
+                }
+            }
+
+            internal static TurnChangeImagePair? BuildTurnChangeImagePair(
+                string beforeDataUrl,
+                string afterDataUrl,
+                RectangleF normalizedRegion,
+                string saveDir,
+                string commandId,
+                int step,
+                int regionIndex)
+            {
+                try
+                {
+                    using var beforeSource = DecodeDataUrlBitmap(beforeDataUrl);
+                    using var afterSource = DecodeDataUrlBitmap(afterDataUrl);
+                    using var beforeCrop = CropNormalizedRegion(beforeSource, normalizedRegion);
+                    using var afterCrop = CropNormalizedRegion(afterSource, normalizedRegion);
+                    var beforePath = LogScreens
+                        ? ScreenLogPath(saveDir, $"{commandId}_{step}_change_{regionIndex}_before")
+                        : null;
+                    var afterPath = LogScreens
+                        ? ScreenLogPath(saveDir, $"{commandId}_{step}_change_{regionIndex}_after")
+                        : null;
+                    if (beforePath is not null)
+                        SaveScreenLogImage(beforeCrop, beforePath);
+                    if (afterPath is not null)
+                        SaveScreenLogImage(afterCrop, afterPath);
+                    return new TurnChangeImagePair(
+                        EncodeCropBitmapToDataUrl(beforeCrop),
+                        EncodeCropBitmapToDataUrl(afterCrop),
+                        beforePath,
+                        afterPath,
+                        regionIndex);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"[turn-event] could not build change-region images: {ex.Message}");
+                    return null;
+                }
+            }
+
+            static Bitmap DecodeDataUrlBitmap(string dataUrl)
+            {
+                var separator = dataUrl.IndexOf(',');
+                if (separator < 0 || separator + 1 >= dataUrl.Length)
+                    throw new InvalidOperationException("invalid image data URL");
+                var bytes = Convert.FromBase64String(dataUrl[(separator + 1)..]);
+                using var stream = new MemoryStream(bytes, writable: false);
+                using var image = Image.FromStream(stream);
+                return new Bitmap(image);
+            }
+
+            static Bitmap CropNormalizedRegion(
+                Bitmap source,
+                RectangleF normalizedRegion)
+            {
+                const double paddingRatio = 0.04;
+                var left = (int)Math.Floor(
+                    (normalizedRegion.Left - paddingRatio) * source.Width);
+                var top = (int)Math.Floor(
+                    (normalizedRegion.Top - paddingRatio) * source.Height);
+                var right = (int)Math.Ceiling(
+                    (normalizedRegion.Right + paddingRatio) * source.Width);
+                var bottom = (int)Math.Ceiling(
+                    (normalizedRegion.Bottom + paddingRatio) * source.Height);
+                var crop = Rectangle.FromLTRB(
+                    Math.Clamp(left, 0, Math.Max(0, source.Width - 1)),
+                    Math.Clamp(top, 0, Math.Max(0, source.Height - 1)),
+                    Math.Clamp(right, 1, source.Width),
+                    Math.Clamp(bottom, 1, source.Height));
+                if (crop.Width < 2 || crop.Height < 2)
+                    throw new InvalidOperationException("change region is too small");
+                return source.Clone(crop, PixelFormat.Format24bppRgb);
+            }
         
             internal static string DownscaleDataUrlForHelperCall(string dataUrl, string? savedPath, int helperMaxWidth)
             {

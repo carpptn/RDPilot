@@ -127,6 +127,9 @@ public sealed class ActionDto
 
     [JsonPropertyName("button")] public string? Button { get; set; }
     [JsonPropertyName("keys")] public string[]? Keys { get; set; }
+    [JsonPropertyName("path")] public GesturePointDto[]? Path { get; set; }
+    [JsonPropertyName("gesture_kind")] public string? GestureKind { get; set; }
+    [JsonPropertyName("duration_ms")] public int? DurationMs { get; set; }
     [JsonPropertyName("text")] public string? Text { get; set; }
     [JsonPropertyName("url")] public string? Url { get; set; }
     [JsonPropertyName("app")] public string? App { get; set; }
@@ -143,8 +146,52 @@ public sealed class ActionDto
     [JsonPropertyName("wait_seconds")] public int? WaitSeconds { get; set; } // wait duration for 'wait'
     [JsonPropertyName("confidence")] public double? Confidence { get; set; } // 0..1 certainty for next action
     [JsonPropertyName("note")] public string? Note { get; set; }    // short comment (required in schema)
+    [JsonPropertyName("world_state_summary")] public string? WorldStateSummary { get; set; }
+    [JsonPropertyName("mechanics_hypothesis")] public string? MechanicsHypothesis { get; set; }
+    [JsonPropertyName("salient_change_observation")] public string? SalientChangeObservation { get; set; }
+    [JsonPropertyName("short_term_plan")] public string? ShortTermPlan { get; set; }
+    [JsonPropertyName("plan_status")] public string? PlanStatus { get; set; }
+    [JsonPropertyName("plan_revision_reason")] public string? PlanRevisionReason { get; set; }
+    [JsonPropertyName("planned_inputs")] public string[]? PlannedInputs { get; set; }
+    [JsonPropertyName("plan_waypoint")] public string? PlanWaypoint { get; set; }
+    [JsonPropertyName("plan_state_id")] public string? PlanStateId { get; set; }
+    [JsonPropertyName("plan_confidence")] public double? PlanConfidence { get; set; }
     [JsonPropertyName("recovery_strategy_id")] public string? RecoveryStrategyId { get; set; }
     [JsonPropertyName("recovery_strategy_step")] public int? RecoveryStrategyStep { get; set; } // 1-based
+    [JsonIgnore] public bool TurnSequenceObserved { get; set; }
+    [JsonIgnore] public string? ResolvedTurnInputLabel { get; set; }
+}
+
+/// <summary>
+/// Wraps the next action and deterministic follow-ups that can run without an
+/// intermediate model decision. Selected turn-input batches may observe locally.
+/// </summary>
+public sealed class ActionBatchDto
+{
+    [JsonPropertyName("actions")] public ActionDto[] Actions { get; set; } = Array.Empty<ActionDto>();
+    [JsonPropertyName("confidence")] public double? Confidence { get; set; }
+    [JsonPropertyName("note")] public string? Note { get; set; }
+    [JsonPropertyName("world_state_summary")] public string? WorldStateSummary { get; set; }
+    [JsonPropertyName("mechanics_hypothesis")] public string? MechanicsHypothesis { get; set; }
+    [JsonPropertyName("salient_change_observation")] public string? SalientChangeObservation { get; set; }
+    [JsonPropertyName("short_term_plan")] public string? ShortTermPlan { get; set; }
+    [JsonPropertyName("plan_status")] public string? PlanStatus { get; set; }
+    [JsonPropertyName("plan_revision_reason")] public string? PlanRevisionReason { get; set; }
+    [JsonPropertyName("planned_inputs")] public string[]? PlannedInputs { get; set; }
+    [JsonPropertyName("plan_waypoint")] public string? PlanWaypoint { get; set; }
+    [JsonPropertyName("plan_state_id")] public string? PlanStateId { get; set; }
+    [JsonPropertyName("plan_confidence")] public double? PlanConfidence { get; set; }
+    [JsonPropertyName("recovery_strategy_id")] public string? RecoveryStrategyId { get; set; }
+    [JsonPropertyName("recovery_strategy_step")] public int? RecoveryStrategyStep { get; set; }
+}
+
+/// <summary>
+/// Represents one point of a pointer gesture in the current screenshot space.
+/// </summary>
+public sealed class GesturePointDto
+{
+    [JsonPropertyName("x_px")] public int XPx { get; set; }
+    [JsonPropertyName("y_px")] public int YPx { get; set; }
 }
 
 internal enum ControlRunOutcome
@@ -176,8 +223,73 @@ internal sealed record ResolvedActionSnapshot(
 {
     public string SemanticTokens { get; init; } = "";
     public Point? DestinationScreenPoint { get; init; }
+    public IReadOnlyList<Point> ScreenPath { get; init; } = Array.Empty<Point>();
+    public Rectangle? ObservationRegion { get; init; }
     public string? ValidationError { get; init; }
     public bool IsValid => string.IsNullOrWhiteSpace(ValidationError);
+}
+
+internal enum VisualChangeState
+{
+    Unknown,
+    Stable,
+    Changed,
+    Unstable,
+    Ambiguous
+}
+
+internal enum ActionOutcomeState
+{
+    NotObserved,
+    Confirmed,
+    NoEffect,
+    UnexpectedChange,
+    Ambiguous
+}
+
+internal enum GoalProgressState
+{
+    Unknown,
+    Progress,
+    NoProgress,
+    Neutral
+}
+
+/// <summary>
+/// A compact unannotated screen representation used by adaptive observation.
+/// </summary>
+internal sealed record ScreenObservationFrame(
+    byte[] GlobalFingerprint,
+    byte[] ActiveWindowFingerprint,
+    byte[] DetailFingerprint,
+    int DetailWidth,
+    int DetailHeight,
+    Rectangle ScreenBounds)
+{
+    public byte[] DetailColorFingerprint { get; init; } = Array.Empty<byte>();
+}
+
+/// <summary>
+/// Separates raw visual motion, the expected action effect, and goal progress.
+/// </summary>
+internal sealed record ObservationAssessment(
+    string Profile,
+    VisualChangeState VisualChange,
+    ActionOutcomeState ActionOutcome,
+    GoalProgressState GoalProgress,
+    double Confidence,
+    double EffectiveDelta,
+    double GlobalDelta,
+    double ActiveWindowDelta,
+    double LocalDelta,
+    double LocalChangedRatio,
+    double ChangeThreshold,
+    string Evidence)
+{
+    public bool SemanticStateChanged { get; init; }
+    public string ActionPolicy { get; init; } = Profile;
+    public bool IsNoChange => VisualChange == VisualChangeState.Stable;
+    public bool IsProgress => GoalProgress == GoalProgressState.Progress;
 }
 
 /// <summary>
@@ -192,6 +304,13 @@ internal readonly record struct SpatialActionCooldown(
 internal sealed record BatchedActionExecutionResult(
     IReadOnlyList<ResolvedActionSnapshot> ExecutedActions,
     string? Error);
+
+internal sealed record TurnChangeImagePair(
+    string BeforeDataUrl,
+    string AfterDataUrl,
+    string? BeforeImagePath,
+    string? AfterImagePath,
+    int RegionIndex);
 
 /// <summary>
 /// Keeps a short-lived visual state history for detecting multi-step loops.
@@ -469,6 +588,17 @@ internal sealed class LoopReplayFrame
     public string FocusSummary { get; set; } = "";
     public ActionDto? PreviousAction { get; set; }
     public double? LastDelta { get; set; }
+    public int ObservationPolicyVersion { get; set; }
+    public string ObservationProfile { get; set; } = "";
+    public string ObservationActionPolicy { get; set; } = "";
+    public string VisualChange { get; set; } = "";
+    public string ActionOutcome { get; set; } = "";
+    public string GoalProgress { get; set; } = "";
+    public bool? SemanticStateChanged { get; set; }
+    public double? ObservationConfidence { get; set; }
+    public double? LocalDelta { get; set; }
+    public double? LocalChangedRatio { get; set; }
+    public double? ObservationThreshold { get; set; }
 }
 
 internal sealed class LoopTelemetryReplayEnvelope

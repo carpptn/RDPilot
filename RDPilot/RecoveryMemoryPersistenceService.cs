@@ -1374,6 +1374,7 @@
             ResolvedActionSnapshot? previousAction,
             double lastDelta,
             LoopDetectionAssessment assessment,
+            ObservationAssessment? observationAssessment,
             string goalMode,
             bool recurringWorkflowIntent)
         {
@@ -1399,7 +1400,21 @@
                     PreviousAction = ReplaySafeAction(previousAction),
                     LastDelta = double.IsFinite(lastDelta)
                         ? lastDelta
-                        : null
+                        : null,
+                    ObservationPolicyVersion = observationAssessment is null ? 0 : 1,
+                    ObservationProfile = observationAssessment?.Profile ?? "",
+                    ObservationActionPolicy = observationAssessment?.ActionPolicy ?? "",
+                    VisualChange = observationAssessment?.VisualChange.ToString() ?? "",
+                    ActionOutcome = observationAssessment?.ActionOutcome.ToString() ?? "",
+                    GoalProgress = observationAssessment?.GoalProgress.ToString() ?? "",
+                    SemanticStateChanged = observationAssessment?.SemanticStateChanged,
+                    ObservationConfidence = observationAssessment?.Confidence,
+                    LocalDelta = observationAssessment is not null &&
+                                 double.IsFinite(observationAssessment.LocalDelta)
+                        ? observationAssessment.LocalDelta
+                        : null,
+                    LocalChangedRatio = observationAssessment?.LocalChangedRatio,
+                    ObservationThreshold = observationAssessment?.ChangeThreshold
                 };
                 var payload = JsonSerializer.Serialize(new
                 {
@@ -1411,6 +1426,10 @@
                     screenHeight,
                     assessment.Confidence,
                     assessment.IndependentlyConfirmed,
+                    observationProfile = observationAssessment?.Profile,
+                    visualChange = observationAssessment?.VisualChange.ToString(),
+                    actionOutcome = observationAssessment?.ActionOutcome.ToString(),
+                    goalProgress = observationAssessment?.GoalProgress.ToString(),
                     goalMode,
                     recurringWorkflowIntent,
                     replayFrame
@@ -1491,8 +1510,13 @@
                 ToYPx = source.ToYPx,
                 Button = source.Button,
                 Keys = source.Keys?
-                    .Select(ReplaySafeKey)
+                    .Select(key => source.Type == "hold_keys"
+                        ? ReplaySafeHeldKey(key)
+                        : ReplaySafeKey(key))
                     .ToArray(),
+                Path = ReplaySafePath(source.Path),
+                GestureKind = source.GestureKind,
+                DurationMs = source.DurationMs,
                 Text = source.Text is null ? null : "<redacted>",
                 UiaIndex = source.UiaIndex,
                 ScrollDy = source.ScrollDy,
@@ -1505,6 +1529,30 @@
             };
         }
 
+        static GesturePointDto[]? ReplaySafePath(GesturePointDto[]? path)
+        {
+            if (path is null)
+                return null;
+            if (path.Length == 0)
+                return [];
+
+            const int maximumStoredPoints = 32;
+            var indices = path.Length <= maximumStoredPoints
+                ? Enumerable.Range(0, path.Length)
+                : Enumerable.Range(0, maximumStoredPoints)
+                    .Select(index => (int)Math.Round(
+                        index * (path.Length - 1) /
+                        (double)(maximumStoredPoints - 1)));
+            return indices
+                .Distinct()
+                .Select(index => new GesturePointDto
+                {
+                    XPx = path[index].XPx / 4 * 4,
+                    YPx = path[index].YPx / 4 * 4
+                })
+                .ToArray();
+        }
+
         static string ReplaySafeKey(string? key)
         {
             var normalized = NormalizeText(key);
@@ -1514,6 +1562,14 @@
                 RegexOptions.CultureInvariant)
                 ? normalized
                 : "<text-key>";
+        }
+
+        static string ReplaySafeHeldKey(string? key)
+        {
+            var safe = ReplaySafeKey(key);
+            return safe is "win" or "<text-key>"
+                ? "space"
+                : safe;
         }
 
         internal static void TryAutoExportLoopReplayCorpus()

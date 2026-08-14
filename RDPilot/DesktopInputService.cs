@@ -5,6 +5,17 @@
     /// </summary>
     internal static class DesktopInputService
     {
+            internal readonly record struct AbsoluteMouseMoveData(int Dx, int Dy, uint Flags);
+            internal sealed record MouseDragPlan(
+                Point[] Moves,
+                int EffectiveDurationMs,
+                int InitialHoldMs);
+
+            const uint MouseEventMove = 0x0001;
+            const uint MouseEventMoveNoCoalesce = 0x2000;
+            const uint MouseEventVirtualDesk = 0x4000;
+            const uint MouseEventAbsolute = 0x8000;
+
             // Controlled desktop region. Multi-monitor capture is opt-in because
             // it increases image size and may expose unrelated secondary screens.
             internal static (int X, int Y, int W, int H) GetPrimaryScreen()
@@ -189,8 +200,15 @@
                     return $"scroll dy={dy}";
                 }
         
+                if (a.Type == "drag_path")
+                {
+                    var points = a.Path ?? Array.Empty<GesturePointDto>();
+                    return $"drag_path kind={a.GestureKind ?? "other"} points={points.Length} duration={EffectiveGestureDurationMs(a)}ms";
+                }
+
                 // keys / type_text / wait / done
                 if (a.Type == "keys") return $"keys [{string.Join("+", a.Keys ?? Array.Empty<string>())}]";
+                if (a.Type == "hold_keys") return $"hold_keys [{string.Join("+", a.Keys ?? Array.Empty<string>())}] {EffectiveKeyHoldDurationMs(a)}ms";
                 if (a.Type == "type_text") return $"type_text \"{Tail(a.Text ?? "", 120)}\"";
                 if (a.Type == "wait")
                 {
@@ -223,7 +241,20 @@
                     var cluster = Math.Max(16, IneffectiveMouseClusterPx);
                     return $"drag_drop:{source.X / cluster},{source.Y / cluster}->{destination.X / cluster},{destination.Y / cluster}";
                 }
+                if (t == "drag_path")
+                {
+                    if (a.Path is null || a.Path.Length < 2)
+                        return "drag_path:missing";
+                    var path = ResolveGesturePath(a);
+                    var cluster = Math.Max(8, IneffectiveMouseClusterPx / 2);
+                    var sampled = path
+                        .Where((_, index) => index == 0 || index == path.Count - 1 || index % Math.Max(1, path.Count / 10) == 0)
+                        .Take(12)
+                        .Select(point => $"{point.X / cluster},{point.Y / cluster}");
+                    return $"drag_path:{a.GestureKind ?? "other"}:{string.Join(';', sampled)}";
+                }
                 if (t == "keys") return $"keys:{string.Join("+", (a.Keys ?? Array.Empty<string>()).Select(k => k.ToLowerInvariant()))}";
+                if (t == "hold_keys") return $"hold_keys:{string.Join("+", (a.Keys ?? Array.Empty<string>()).Select(k => k.ToLowerInvariant()))}:{EffectiveKeyHoldDurationMs(a)}";
                 if (t == "type_text")
                     return $"type_text:{StableSensitiveSignature(a.Text)}:{StableActionContext(a)}";
                 if (t == "scroll") return $"scroll:{a.ScrollDy ?? 0}";
@@ -313,6 +344,29 @@
                     screenPoint = new Point(source.X, source.Y);
                     destinationScreenPoint = new Point(destination.X, destination.Y);
                 }
+                else if (validationError is null && action.Type == "drag_path")
+                {
+                    var path = ResolveGesturePath(action);
+                    screenPoint = path[0];
+                    destinationScreenPoint = path[^1];
+                }
+                else if (validationError is null && action.Type is "focus_uia" or "click_uia")
+                {
+                    var target = ResolveUiaTarget(action);
+                    screenPoint = new Point(target.CenterX, target.CenterY);
+                }
+
+                IReadOnlyList<Point> screenPath = Array.Empty<Point>();
+                if (validationError is null && action.Type == "drag_path")
+                    screenPath = ResolveGesturePath(action);
+                else if (validationError is null && action.Type == "drag_drop" &&
+                         screenPoint is Point dragSource &&
+                         destinationScreenPoint is Point dragDestination)
+                    screenPath = new[] { dragSource, dragDestination };
+
+                var observationRegion = validationError is null
+                    ? BuildActionObservationRegion(action, screenPoint, screenPath)
+                    : null;
 
                 string description;
                 string signature;
@@ -328,6 +382,8 @@
                     screenPoint)
                 {
                     DestinationScreenPoint = destinationScreenPoint,
+                    ScreenPath = screenPath,
+                    ObservationRegion = observationRegion,
                     SemanticTokens = ActionSemanticTokens(action),
                     ValidationError = validationError
                 };
@@ -391,6 +447,66 @@
                         return "drag_drop source and destination are effectively identical.";
                 }
 
+                if (action.Type == "drag_path")
+                {
+                    if (action.Path is null || action.Path.Length < 2)
+                        return "drag_path requires at least two path points.";
+                    if (action.Path.Length > MaxGesturePathPoints)
+                        return $"drag_path accepts at most {MaxGesturePathPoints} points.";
+                    foreach (var point in action.Path)
+                    {
+                        if (point is null)
+                            return "drag_path points cannot be null.";
+                        if (point.XPx < 0 || point.YPx < 0 ||
+                            point.XPx >= CurrentScreenMap.ImageW ||
+                            point.YPx >= CurrentScreenMap.ImageH)
+                        {
+                            return "drag_path points must stay inside the current screenshot.";
+                        }
+                    }
+                    var path = ResolveGesturePath(action);
+                    double totalLength = 0;
+                    for (var index = 1; index < path.Count; index++)
+                        totalLength += Distance(path[index - 1], path[index]);
+                    var diagonal = Math.Sqrt(
+                        CurrentScreenMap.ScreenW * (double)CurrentScreenMap.ScreenW +
+                        CurrentScreenMap.ScreenH * (double)CurrentScreenMap.ScreenH);
+                    if (totalLength < 4)
+                        return "drag_path must contain visible movement.";
+                    if (totalLength > diagonal * 8)
+                        return "drag_path is longer than the bounded gesture limit.";
+                    if (action.DurationMs is < 100 or > MaxGestureDurationMs)
+                        return $"drag_path duration_ms must be between 100 and {MaxGestureDurationMs}.";
+                    if (action.GestureKind is not null &&
+                        action.GestureKind.ToLowerInvariant() is not ("draw" or "lasso" or "pan" or "slider" or "game" or "other"))
+                        return "drag_path gesture_kind is not supported.";
+                }
+
+                if (action.Type == "hold_keys")
+                {
+                    if (action.Keys is null || action.Keys.Length == 0)
+                        return "hold_keys requires at least one key.";
+                    if (action.Keys.Length > MaxHeldKeys)
+                        return $"hold_keys accepts at most {MaxHeldKeys} simultaneous keys.";
+                    if (action.DurationMs is null or < 100 or > MaxKeyHoldDurationMs)
+                        return $"hold_keys duration_ms must be between 100 and {MaxKeyHoldDurationMs}.";
+                    try
+                    {
+                        foreach (var key in action.Keys)
+                        {
+                            if (string.IsNullOrWhiteSpace(key) || key.Contains('+'))
+                                return "hold_keys keys must be individual key names, not chord strings.";
+                            if (!IsHoldableKey(key))
+                                return $"hold_keys does not allow the key '{key}'.";
+                            _ = KeyNameToVk(key);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        return $"hold_keys contains an unsupported key: {ex.Message}";
+                    }
+                }
+
                 return null;
             }
 
@@ -446,9 +562,52 @@
                 right > left &&
                 bottom > top;
 
+            internal static IReadOnlyList<Point> ResolveGesturePath(ActionDto action)
+            {
+                if (action.Path is null)
+                    return Array.Empty<Point>();
+                return action.Path
+                    .Select(point => CurrentScreenMap.ImageToScreenPoint(point.XPx, point.YPx))
+                    .Select(point => new Point(point.X, point.Y))
+                    .ToArray();
+            }
+
+            static Rectangle? BuildActionObservationRegion(
+                ActionDto action,
+                Point? screenPoint,
+                IReadOnlyList<Point> path)
+            {
+                if (path.Count > 0)
+                {
+                    var left = path.Min(point => point.X);
+                    var top = path.Min(point => point.Y);
+                    var right = path.Max(point => point.X);
+                    var bottom = path.Max(point => point.Y);
+                    var padding = action.Type == "drag_path" ? 24 : 48;
+                    return ClampRect(Rectangle.FromLTRB(
+                        left - padding,
+                        top - padding,
+                        right + padding + 1,
+                        bottom + padding + 1));
+                }
+                if (screenPoint is Point point &&
+                    action.Type is "click" or "double_click" or "focus_uia" or "click_uia")
+                    return ClampRect(SquareAround(point.X, point.Y, 128));
+                return null;
+            }
+
+            static double Distance(Point left, Point right)
+            {
+                var dx = (long)right.X - left.X;
+                var dy = (long)right.Y - left.Y;
+                return Math.Sqrt(dx * dx + dy * dy);
+            }
+
             static string ActionSemanticTokens(ActionDto action)
             {
                 var raw = action.Note ?? "";
+                if (!string.IsNullOrWhiteSpace(action.GestureKind))
+                    raw += $" {action.GestureKind}";
                 if (action.UiaIndex is int index)
                 {
                     var target = CurrentUiaTargets.FirstOrDefault(item => item.Index == index);
@@ -590,7 +749,18 @@
                             {
                                 var source = ResolvePoint(action);
                                 var destination = ResolveDropPoint(action);
-                                MouseDragDrop(source, destination, action.Button ?? "left", EffectiveDragDurationMs(action));
+                                MouseDragPath(
+                                    new[] { new Point(source.X, source.Y), new Point(destination.X, destination.Y) },
+                                    action.Button ?? "left",
+                                    EffectiveDragDurationMs(action));
+                                break;
+                            }
+                        case "drag_path":
+                            {
+                                MouseDragPath(
+                                    ResolveGesturePath(action),
+                                    action.Button ?? "left",
+                                    EffectiveGestureDurationMs(action));
                                 break;
                             }
                         case "keys":
@@ -598,6 +768,11 @@
                                 if (action.Keys is null || action.Keys.Length == 0)
                                     throw new InvalidOperationException("Missing keys");
                                 PressKeysSmart(action.Keys);
+                                break;
+                            }
+                        case "hold_keys":
+                            {
+                                HoldKeys(action.Keys ?? Array.Empty<string>(), EffectiveKeyHoldDurationMs(action));
                                 break;
                             }
                         case "type_text":
@@ -804,6 +979,12 @@
 
             internal static int EffectiveDragDurationMs(ActionDto action) =>
                 Math.Clamp(action.DragDurationMs ?? 500, 100, 3000);
+
+            internal static int EffectiveGestureDurationMs(ActionDto action) =>
+                Math.Clamp(action.DurationMs ?? 800, 100, MaxGestureDurationMs);
+
+            internal static int EffectiveKeyHoldDurationMs(ActionDto action) =>
+                Math.Clamp(action.DurationMs ?? 250, 100, MaxKeyHoldDurationMs);
         
             internal static (int X, int Y) NormalizedToPixels(double nx, double ny)
             {
@@ -831,33 +1012,50 @@
                 string button,
                 int durationMs)
             {
+                MouseDragPath(
+                    new[] { new Point(source.X, source.Y), new Point(destination.X, destination.Y) },
+                    button,
+                    durationMs);
+            }
+
+            internal static void MouseDragPath(
+                IReadOnlyList<Point> path,
+                string button,
+                int durationMs)
+            {
+                if (path is null || path.Count < 2)
+                    throw new InvalidOperationException("A pointer path requires at least two points.");
+
                 var (down, up) = MouseButtonFlags(button);
-                if (!SetCursorPos(source.X, source.Y))
-                    throw new InvalidOperationException($"Could not position cursor at drag source ({source.X},{source.Y}).");
+                var plan = BuildMouseDragPlan(path, durationMs);
+                SendAbsoluteMouseMove(path[0].X, path[0].Y, "drag initial move");
 
                 var pressed = false;
+                var movesSent = 0;
                 Exception? dragFailure = null;
+                var dragStopwatch = Stopwatch.StartNew();
+                double buttonDownAtMs = 0;
                 try
                 {
                     SendInputWithRetry(
                         [new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = down } } }],
                         "drag button down");
                     pressed = true;
-                    Thread.Sleep(80); // Some controls need a short press before motion starts.
+                    buttonDownAtMs = dragStopwatch.Elapsed.TotalMilliseconds;
+                    Console.WriteLine(
+                        $"[input] drag_path button={button} phase=down; points={path.Count}; " +
+                        $"moves_planned={plan.Moves.Length}; duration={plan.EffectiveDurationMs}ms");
 
-                    var effectiveDuration = Math.Clamp(durationMs, 100, 3000);
-                    var steps = Math.Clamp(effectiveDuration / 16, 6, 120);
-                    var delay = Math.Max(1, effectiveDuration / steps);
-                    for (var i = 1; i <= steps; i++)
+                    for (var index = 0; index < plan.Moves.Length; index++)
                     {
-                        if (CancelRequested)
-                            throw new OperationCanceledException("Drag cancelled by the emergency hotkey.");
-                        var progress = i / (double)steps;
-                        var x = (int)Math.Round(source.X + (destination.X - source.X) * progress);
-                        var y = (int)Math.Round(source.Y + (destination.Y - source.Y) * progress);
-                        if (!SetCursorPos(x, y))
-                            throw new InvalidOperationException($"Could not move cursor during drag to ({x},{y}).");
-                        Thread.Sleep(delay);
+                        var targetElapsedMs = GestureMoveTargetElapsedMs(
+                            plan,
+                            index,
+                            buttonDownAtMs);
+                        WaitUntilGestureTime(dragStopwatch, targetElapsedMs);
+                        var point = plan.Moves[index];
+                        SendAbsoluteMouseMove(point.X, point.Y, "drag path move");
+                        movesSent++;
                     }
                 }
                 catch (Exception ex)
@@ -874,6 +1072,10 @@
                             SendInputWithRetry(
                                 [new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = up } } }],
                                 "drag button up");
+                            dragStopwatch.Stop();
+                            Console.WriteLine(
+                                $"[input] drag_path button={button} phase=up; " +
+                                $"moves_sent={movesSent}/{plan.Moves.Length}; elapsed={dragStopwatch.ElapsedMilliseconds}ms");
                         }
                         catch (Exception releaseFailure) when (dragFailure is not null)
                         {
@@ -881,6 +1083,147 @@
                         }
                     }
                 }
+            }
+
+            internal static MouseDragPlan BuildMouseDragPlan(
+                IReadOnlyList<Point> path,
+                int durationMs)
+            {
+                if (path is null || path.Count < 2)
+                    throw new InvalidOperationException("A pointer path requires at least two points.");
+
+                var effectiveDuration = Math.Clamp(durationMs, 100, MaxGestureDurationMs);
+                var lengths = new double[path.Count - 1];
+                double totalLength = 0;
+                for (var index = 1; index < path.Count; index++)
+                {
+                    lengths[index - 1] = Distance(path[index - 1], path[index]);
+                    totalLength += lengths[index - 1];
+                }
+                if (totalLength < 1)
+                    throw new InvalidOperationException("Pointer path has no movement.");
+
+                var targetSteps = Math.Clamp(
+                    Math.Max(effectiveDuration / 8, (int)Math.Ceiling(totalLength / 4)),
+                    path.Count - 1,
+                    600);
+                var segmentStepCounts = lengths
+                    .Select(length => Math.Max(
+                        1,
+                        (int)Math.Round(targetSteps * length / totalLength)))
+                    .ToArray();
+                var moves = new List<Point>(segmentStepCounts.Sum());
+                for (var segment = 1; segment < path.Count; segment++)
+                {
+                    var segmentSteps = segmentStepCounts[segment - 1];
+                    var source = path[segment - 1];
+                    var destination = path[segment];
+                    for (var index = 1; index <= segmentSteps; index++)
+                    {
+                        var progress = index / (double)segmentSteps;
+                        moves.Add(new Point(
+                            (int)Math.Round(source.X + (destination.X - source.X) * progress),
+                            (int)Math.Round(source.Y + (destination.Y - source.Y) * progress)));
+                    }
+                }
+
+                var initialHoldMs = Math.Clamp(effectiveDuration / 10, 20, 80);
+                return new MouseDragPlan(
+                    moves.ToArray(),
+                    effectiveDuration,
+                    initialHoldMs);
+            }
+
+            internal static double GestureMoveTargetElapsedMs(
+                MouseDragPlan plan,
+                int moveIndex,
+                double buttonDownAtMs = 0)
+            {
+                if (moveIndex < 0 || moveIndex >= plan.Moves.Length)
+                    throw new ArgumentOutOfRangeException(nameof(moveIndex));
+
+                var movementDuration = plan.EffectiveDurationMs - plan.InitialHoldMs;
+                return buttonDownAtMs +
+                    plan.InitialHoldMs +
+                    movementDuration * (moveIndex + 1.0) / plan.Moves.Length;
+            }
+
+            internal static void WaitUntilGestureTime(
+                Stopwatch stopwatch,
+                double targetElapsedMs)
+            {
+                while (true)
+                {
+                    if (CancelRequested)
+                        throw new OperationCanceledException(
+                            "Pointer gesture cancelled by the emergency hotkey.");
+
+                    var remainingMs = targetElapsedMs - stopwatch.Elapsed.TotalMilliseconds;
+                    if (remainingMs <= 0)
+                        return;
+                    if (remainingMs >= 3)
+                    {
+                        Thread.Sleep(Math.Max(1, (int)Math.Floor(remainingMs) - 1));
+                        continue;
+                    }
+                    Thread.SpinWait(64);
+                }
+            }
+
+            internal static AbsoluteMouseMoveData BuildAbsoluteMouseMoveData(
+                int screenX,
+                int screenY,
+                int desktopX,
+                int desktopY,
+                int desktopW,
+                int desktopH)
+            {
+                static int Normalize(int value, int origin, int size) =>
+                    (int)Math.Round(
+                        Math.Clamp(value - origin, 0, Math.Max(0, size - 1)) *
+                        65535.0 /
+                        Math.Max(1, size - 1));
+
+                return new AbsoluteMouseMoveData(
+                    Normalize(screenX, desktopX, desktopW),
+                    Normalize(screenY, desktopY, desktopH),
+                    MouseEventMove |
+                    MouseEventMoveNoCoalesce |
+                    MouseEventVirtualDesk |
+                    MouseEventAbsolute);
+            }
+
+            static void SendAbsoluteMouseMove(int screenX, int screenY, string label)
+            {
+                var desktopX = GetSystemMetrics((int)SystemMetric.SM_XVIRTUALSCREEN);
+                var desktopY = GetSystemMetrics((int)SystemMetric.SM_YVIRTUALSCREEN);
+                var desktopW = GetSystemMetrics((int)SystemMetric.SM_CXVIRTUALSCREEN);
+                var desktopH = GetSystemMetrics((int)SystemMetric.SM_CYVIRTUALSCREEN);
+                if (desktopW <= 0 || desktopH <= 0)
+                    (desktopX, desktopY, desktopW, desktopH) = GetPrimaryScreen();
+
+                var move = BuildAbsoluteMouseMoveData(
+                    screenX,
+                    screenY,
+                    desktopX,
+                    desktopY,
+                    desktopW,
+                    desktopH);
+                SendInputWithRetry(
+                    [new INPUT
+                    {
+                        type = 0,
+                        U = new InputUnion
+                        {
+                            mi = new MOUSEINPUT
+                            {
+                                dx = move.Dx,
+                                dy = move.Dy,
+                                dwFlags = move.Flags
+                            }
+                        }
+                    }],
+                    label);
             }
 
             static (uint Down, uint Up) MouseButtonFlags(string? button) =>
@@ -1053,6 +1396,113 @@
         
             internal static void KeyDown(string key) { SendKeyboard(KeyNameToVk(key), false); }
             internal static void KeyUp(string key) { SendKeyboard(KeyNameToVk(key), true); }
+
+            static readonly object HeldKeysGate = new();
+            static readonly HashSet<string> HeldKeys = new(StringComparer.OrdinalIgnoreCase);
+
+            internal static void HoldKeys(string[] keys, int durationMs)
+            {
+                if (keys is null || keys.Length == 0 || keys.Length > MaxHeldKeys)
+                    throw new InvalidOperationException($"hold_keys requires 1..{MaxHeldKeys} keys.");
+
+                var normalized = keys
+                    .Select(key => key?.Trim().ToLowerInvariant() ?? "")
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                if (normalized.Any(key => !IsHoldableKey(key)))
+                    throw new InvalidOperationException(
+                        "hold_keys accepts only letters, digits, arrows, Space, Shift, Ctrl, and Alt.");
+                var pressed = new List<string>(normalized.Length);
+                Exception? holdFailure = null;
+                try
+                {
+                    foreach (var key in normalized)
+                    {
+                        KeyDown(key);
+                        pressed.Add(key);
+                        lock (HeldKeysGate)
+                            HeldKeys.Add(key);
+                    }
+
+                    var remaining = Math.Clamp(durationMs, 100, MaxKeyHoldDurationMs);
+                    while (remaining > 0)
+                    {
+                        if (CancelRequested)
+                            throw new OperationCanceledException("Key hold cancelled by the emergency hotkey.");
+                        var slice = Math.Min(25, remaining);
+                        Thread.Sleep(slice);
+                        remaining -= slice;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    holdFailure = ex;
+                    throw;
+                }
+                finally
+                {
+                    Exception? firstReleaseFailure = null;
+                    foreach (var key in pressed.AsEnumerable().Reverse())
+                    {
+                        var released = false;
+                        try
+                        {
+                            KeyUp(key);
+                            released = true;
+                        }
+                        catch (Exception releaseFailure)
+                        {
+                            Console.WriteLine(
+                                holdFailure is null
+                                    ? $"[input] held key '{key}' could not be released: {releaseFailure.Message}"
+                                    : $"[input] key hold failed and '{key}' release also failed: {releaseFailure.Message}");
+                            firstReleaseFailure ??= releaseFailure;
+                        }
+                        finally
+                        {
+                            if (released)
+                            {
+                                lock (HeldKeysGate)
+                                    HeldKeys.Remove(key);
+                            }
+                        }
+                    }
+                    if (holdFailure is null && firstReleaseFailure is not null)
+                        throw new InvalidOperationException(
+                            "One or more held keys could not be released.",
+                            firstReleaseFailure);
+                }
+            }
+
+            internal static void ReleaseAllHeldKeys()
+            {
+                string[] held;
+                lock (HeldKeysGate)
+                {
+                    held = HeldKeys.ToArray();
+                    HeldKeys.Clear();
+                }
+                foreach (var key in held.Reverse())
+                {
+                    try { KeyUp(key); }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[input] could not release held key '{key}': {ex.Message}");
+                    }
+                }
+            }
+
+            static bool IsHoldableKey(string? key)
+            {
+                var normalized = key?.Trim().ToLowerInvariant() ?? "";
+                if (normalized.Length == 1 &&
+                    (char.IsLetterOrDigit(normalized[0]) || normalized[0] == ' '))
+                    return true;
+                return normalized is "left" or "right" or "up" or "down" or
+                    "arrowleft" or "arrowright" or "arrowup" or "arrowdown" or
+                    "space" or "spacebar" or "shift" or "ctrl" or "control" or
+                    "alt" or "option";
+            }
         
             internal static ushort KeyNameToVk(string key)
             {

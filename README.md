@@ -33,6 +33,7 @@ open Edge browser, go to Google.com, and search for the term 'life'
 
 **1. Task Retrieval (Prompt)**  
 The application first retrieves a **prompt** that defines the goal to be achieved (the task description for the model).  
+In the interactive console, `Up` and `Down` navigate the persistent prompt history, while `Left`, `Right`, `Home`, `End`, `Backspace`, and `Delete` edit the recalled line. Accepted tasks and `/ask` questions are stored in `%LOCALAPPDATA%\RDPilot\prompt-history.json`. Identical entries are deduplicated and moved to the newest position; the file retains up to 500 prompts.
 
 **2. Initial Screenshot & Model Input**  
 A screenshot of the primary screen—or the full virtual desktop when explicitly enabled—is captured.
@@ -42,7 +43,7 @@ A screenshot of the primary screen—or the full virtual desktop when explicitly
 This screenshot, along with the task prompt, is then sent to the LLM.  
 
 **3. Model Decision**  
-The LLM (e.g., GPT-5.6) responds with **exactly one action** to be executed, following a strict JSON schema.  
+The LLM (e.g., GPT-5.6) responds with a strict JSON `actions` array. The first item is the next action; optional follow-ups are accepted only for a bounded deterministic sequence that does not require an intermediate model decision. Selected reversible turn-input sequences are observed locally after every input.
 The available actions include:  
 - `paste_text`
 - `focus_uia`
@@ -128,11 +129,14 @@ Logs are stored in the following folders:
 | Pixel grid overlay        | `GRID_STEP_PX=###` or `0`                         | `--grid <px>`                    | Default `0`; e.g. `100` for a 100-px grid |
 | Max control steps         | `MAX_STEPS=###`                                   | `--max-steps <n>`                | Default `10000`; `0` removes the step limit for genuinely open-ended goals |
 | Goal mode                 | `GOAL_MODE=auto/finite/continuous`                | `--goal-mode <mode>`             | Default `auto`; explicitly overrides heuristic classification when a goal is ambiguous |
+| Observation profile       | `OBSERVATION_PROFILE=auto/general/static_ui/local_editing/event_driven/streaming_output/turn_based_interaction/realtime_interaction` | `--observation-profile <name>` | Default `auto`; begins with `general` and dynamically switches profiles for the current situation |
+| Observation diagnostics   | `OBSERVATION_LOG_VERBOSE=1/0`                     | `--observation-log-verbose` / `--no-observation-log-verbose` | Profile transitions are always logged; verbose mode also logs every assessment and its thresholds |
 | Max wait duration         | `MAX_WAIT_SECONDS=###`                            | `--max-wait <seconds>`           | Default `30` in fast mode; `0` disables capping |
-| Output token cap          | `MAX_OUTPUT_TOKENS=###`                           | `--max-output-tokens <n>`        | Default `4000`; profiles do not lower a stronger configured budget |
-| Q&A output token cap      | `QA_MAX_OUTPUT_TOKENS=###`                        | `--qa-max-output-tokens <n>`     | Default `2500`; profiles do not lower a stronger configured budget |
-| Verify output token cap   | `VERIFY_MAX_OUTPUT_TOKENS=###`                    | `--verify-max-output-tokens <n>` | Default `1500`; profiles do not lower a stronger configured budget |
-| Incomplete output retry   | `INCOMPLETE_MAX_OUTPUT_RETRIES`, `INCOMPLETE_MAX_OUTPUT_TOKEN_CAP` | `--incomplete-max-output-retries <n>`, `--incomplete-max-output-token-cap <n>` | On `status=incomplete` / `max_output_tokens`, expands the cap first, then lowers effort one step at a time through `max → xhigh → high → medium → low`; `n` controls same-effort cap expansions (minimum one), never the final fallback to `low` |
+| Output token cap          | `MAX_OUTPUT_TOKENS=###`                           | `--max-output-tokens <n>`        | Default `10000`; profiles do not lower a stronger configured budget |
+| Q&A output token cap      | `QA_MAX_OUTPUT_TOKENS=###`                        | `--qa-max-output-tokens <n>`     | Default `4000`; profiles do not lower a stronger configured budget |
+| Verify output token cap   | `VERIFY_MAX_OUTPUT_TOKENS=###`                    | `--verify-max-output-tokens <n>` | Default `6000`; sized for `effort=max`, and profiles do not lower a stronger configured budget |
+| Turn reanalysis cap       | `TURN_REANALYSIS_MAX_OUTPUT_TOKENS=###`           | `--turn-reanalysis-max-output-tokens <n>` | Default `10000`; used immediately after a novel, remote, or broad turn-state change |
+| Incomplete output retry   | `INCOMPLETE_MAX_OUTPUT_RETRIES`, `INCOMPLETE_MAX_OUTPUT_TOKEN_CAP` | `--incomplete-max-output-retries <n>`, `--incomplete-max-output-token-cap <n>` | On `status=incomplete` / `max_output_tokens`, a request with reasoning immediately lowers effort one step through `max → xhigh → high → medium → low` without enlarging that request; models without an effort ladder may expand the cap up to `n` times |
 | Max action text length    | `MAX_ACTION_TEXT_CHARS=###`                       | `--max-action-text-chars <n>`    | Default `3000`; long `paste_text` / `type_text` content should be split across actions |
 | Q&A screenshot width      | `QA_SCREENSHOT_MAX_WIDTH=###`                     | `--qa-screenshot-max-width <px>` | Default `1024` in fast mode; `0` uses normal send image |
 | Verify screenshot width   | `VERIFY_SCREENSHOT_MAX_WIDTH=###`                 | `--verify-screenshot-max-width <px>` | Default `1024` in fast mode; `0` uses normal send image |
@@ -143,6 +147,7 @@ Logs are stored in the following folders:
 | Repeated action guard     | `MAX_REPEATED_ACTIONS=###`                        | `--max-repeated-actions <n>`     | Default `5` in fast mode; `0` disables |
 | Repeat cooldown           | `ACTION_REPEAT_COOLDOWN_STEPS=###`                | `--repeat-cooldown <n>`          | Default `2` in fast mode; temporarily blocks identical ineffective UI actions |
 | Rejected-proposal guard   | `MAX_REJECTED_PROPOSAL_REPEATS=###`               | `--max-rejected-proposals <n>`   | Default `5`; detects direct and multi-step cycles of model actions rejected by local policy; `0` disables |
+| Inspection-action guard   | `MAX_CONSECUTIVE_INSPECTION_ACTIONS=###`           | `--max-inspection-actions <n>`   | Default `2`; blocks repeated or excessive `request_crop`/`point` inspection until RDPilot executes a state-changing interaction; `0` removes only the count cap |
 | Proactive loop confidence | `PROACTIVE_LOOP_CONFIDENCE_THRESHOLD=0.5..1.0`   | `--loop-confidence-threshold <n>` | Default `0.75`; higher values reduce false-positive multi-step loop detection |
 | Model failure guard       | `MAX_MODEL_FAILURES=###`                          | `--max-model-failures <n>`       | Default `2` in fast mode; keeps transient API failures from aborting immediately |
 | Local action failure guard | `MAX_ACTION_FAILURES=###`                        | `--max-action-failures <n>`      | Default `2` in fast mode; feeds executor failures back to the model before aborting |
@@ -182,7 +187,11 @@ Logs are stored in the following folders:
 | OpenAI timeout            | `OPENAI_TIMEOUT_SECONDS=###`                      | `--openai-timeout <seconds>`     | Default `600`; `0` disables the client-side timeout |
 | Prompt cache              | `PROMPT_CACHE=1/0`                                | `--prompt-cache` / `--no-prompt-cache` | Default on |
 | Prompt cache key          | `PROMPT_CACHE_KEY=<key>`                          | `--prompt-cache-key <key>`       | Default `rdpilot-control-v1`; RDPilot appends `:control`, `:qa`, or `:verify` |
-| Previous response state   | `USE_PREVIOUS_RESPONSE_ID=1/0`                    | `--previous-response-state` / `--no-previous-response-state` | Default off; opt-in Responses API state between control steps |
+| Previous response state   | `USE_PREVIOUS_RESPONSE_ID=1/0`                    | `--previous-response-state` / `--no-previous-response-state` | Default on; one Responses API chain per control task |
+| Control reasoning context | `CONTROL_REASONING_CONTEXT=all_turns/current_turn/auto` | `--control-reasoning-context <mode>` | Default `all_turns`; helper/verifier calls remain `current_turn` and unchained |
+| Context compaction        | `CONTROL_CONTEXT_COMPACTION=1/0`                 | `--context-compaction` / `--no-context-compaction` | Default on for control chains |
+| Context compact threshold | `CONTROL_CONTEXT_COMPACT_THRESHOLD=###`          | `--context-compact-threshold <tokens>` | Default `700000`; server compaction runs only on long tasks |
+| Context fallback limit    | `CONTROL_CONTEXT_FALLBACK_LIMIT=###`              | `--context-fallback-limit <n>`   | Default `3`; repeated state failures fall back to explicit application history |
 | Omit unchanged screen     | `OMIT_UNCHANGED_SCREEN_IMAGE=1/0`                 | `--omit-unchanged-screen` / `--no-omit-unchanged-screen` | Default off; only applies with previous-response state and unchanged screen fingerprint |
 | Long text paste threshold | `CLIPBOARD_PASTE_THRESHOLD=###`                   | `--paste-threshold <n>`          | Default `120`; long `type_text` uses clipboard |
 | AIM/focus crop size       | `FOCUS_CROP_SIZE=###`                             | `--focus-crop-size <px>`         | Default `320`; reduce for smaller crop payloads |
@@ -192,7 +201,9 @@ Logs are stored in the following folders:
 | Real UI only              | `REAL_UI_ONLY=1/0`                                | `--real-ui-only`                 | Forces local adapters off even if config/env enabled them |
 | High-level local actions  | `ALLOW_HIGH_LEVEL_ACTIONS=1/0`                    | `--allow-high-level-actions`     | Default off; real UI is the default |
 | Run commands              | `ALLOW_RUN_COMMAND=1/0`                           | `--allow-run-command`            | Default off |
-| Batch response candidates | `EXECUTE_MULTI_ACTION_CANDIDATES=1/0`             | `--batch-candidates` / `--no-batch-candidates` | Default off; experimental, UI-safe follow-up actions only |
+| Batch action sequences    | `EXECUTE_MULTI_ACTION_CANDIDATES=1/0`             | `--batch-candidates` / `--no-batch-candidates` | Default on; guarded launch/form-edit chains and bounded stable-canvas draw batches, with compact schemas, streaming, adaptive terminal waits, and observation barriers |
+| Max batch follow-ups      | `MAX_QUEUED_BATCH_ACTIONS=###`                    | `--max-batch-actions <n>`        | Default `4`; the schema permits the first action plus this many bounded follow-ups |
+| Turn-based batch inputs   | `TURN_BASED_MAX_BATCH_INPUTS=###`                 | `--turn-batch-inputs <n>`        | Default `32`; applies only to observed directional/click routes (`2..64`) |
 | Console auto-hide         | `AUTO_HIDE_CONSOLE=1/0`                           | `--auto-hide-console` / `--no-auto-hide-console` | Default on; hides RDPilot console before screenshots/control actions |
 | Console placement         | `MINIMIZE_CONSOLE_DURING_RUN=1/0`                 | `--minimize-console`             | Compatibility flag that minimizes instead of hiding before the run |
 | Console restore           | `RESTORE_CONSOLE_AFTER_RUN=1/0`                   | `--restore-console` / `--no-restore-console` | Default on |
@@ -235,8 +246,9 @@ Example:
   "historyTailLines": 12,
   "qaMaxOutputTokens": 300,
   "verifyMaxOutputTokens": 120,
+  "turnReanalysisMaxOutputTokens": 10000,
   "incompleteMaxOutputRetries": 2,
-  "incompleteMaxOutputTokenCap": 4096,
+  "incompleteMaxOutputTokenCap": 16000,
   "maxActionTextChars": 3000,
   "qaScreenshotMaxWidth": 1024,
   "verifyScreenshotMaxWidth": 1024,
@@ -244,10 +256,13 @@ Example:
   "maxStagnationSteps": 8,
   "maxRepeatedActions": 5,
   "actionRepeatCooldownSteps": 2,
+  "maxConsecutiveInspectionActions": 2,
   "proactiveLoopConfidenceThreshold": 0.75,
   "maxModelFailures": 2,
   "maxActionFailures": 2,
   "goalMode": "auto",
+  "observationProfile": "auto",
+  "observationLogVerbose": false,
   "recoveryMemory": true,
   "recoveryMemoryTriggerSteps": 2,
   "recoveryMemoryValidationSteps": 2,
@@ -292,14 +307,18 @@ Example:
   "focusCropSize": 320,
   "promptCache": true,
   "promptCacheKey": "rdpilot-control-v1",
-  "usePreviousResponseId": false,
+  "usePreviousResponseId": true,
+  "controlReasoningContext": "all_turns",
+  "controlContextCompaction": true,
+  "controlContextCompactThreshold": 700000,
+  "controlContextFallbackLimit": 3,
   "omitUnchangedScreenImage": false,
   "realUiOnly": false,
   "allowHighLevelActions": false,
   "autoHideConsoleDuringRun": true,
   "restoreConsoleAfterRun": true,
   "prettyRequestLogs": false,
-  "executeMultiActionCandidates": false,
+  "executeMultiActionCandidates": true,
   "includeUiaTargets": true,
   "maxUiaTargets": 20,
   "uiaTargetNameMaxChars": 48,
@@ -324,6 +343,8 @@ Example:
 The control loop can temporarily raise reasoning effort to `medium`/`high` when it detects stagnation or repeated ineffective actions, but never lowers a configured effort such as `max`.
 Use `--no-adaptive-effort` to keep `gpt-5.6-luna` on the configured effort for latency-sensitive runs.
 Q&A and verifier calls can use separate effort settings, so helper calls can use a deliberately lower effort when explicitly configured. Profiles do not lower a stronger configured helper effort. For helper calls, `default` is explicit: it omits `reasoning.effort` instead of falling back to the control-loop effort.
+
+Runtime profiles are separate from adaptive observation profiles. `custom`/`fast`/`balanced`/`quality` configure cost, payload, and quality for the whole run. `ObservationProfile` describes the current screen situation and may change per action. Automatic observation starts at `general`, then uses `static_ui`, `local_editing`, `event_driven`, `streaming_output`, `turn_based_interaction`, or `realtime_interaction` when the evidence is strong enough. `turn_based_interaction` performs one discrete reversible input followed by observation, while realtime gestures and bounded key holds retain `realtime_interaction`. Console and run logs record each transition with its confidence and reason; replay telemetry additionally records the visual-change, action-outcome, and goal-progress assessments.
 Verifier calls use a smaller output-token cap by default because they return only `yes`/`no` plus a short reason.
 Q&A and verifier calls can use their own smaller screenshot width, keeping helper calls cheaper than the main control loop.
 Verifier prompts keep `SCREEN_SIZE` aligned with the actual helper image after downscaling.
@@ -333,7 +354,8 @@ The high-confidence skip threshold is configurable with `--skip-verify-confidenc
 The control system prompt avoids per-step action-list churn; dynamic allowed actions stay in the JSON schema, which improves prompt-cache reuse across steps.
 The configured prompt-cache key is treated as a base key; control, Q&A, and verifier calls use separate scoped keys so different prompt prefixes do not compete with each other.
 Control requests split stable user context from dynamic history/metadata, letting prompt caching reuse more of the prefix between steps.
-`--previous-response-state` enables Responses API `previous_response_id` for control steps and omits the explicit action-history tail after the first turn, while still sending fresh screenshots and current metadata.
+Responses API `previous_response_id` is enabled by default. Each user goal gets a new control chain with `reasoning.context=all_turns`; the final verifier, recovery verifier, classifiers, and Q&A calls remain independent and use `current_turn` without the controller's response ID. The explicit action-history tail is omitted after the first chained turn, while fresh screenshots and authoritative runtime checkpoints are still sent.
+Long control tasks use server-side compaction at the configured high token threshold. If `context_management` is unavailable, RDPilot disables compaction for that task; if `previous_response_id` is rejected, it retries the same turn once from the application checkpoint without executing a duplicate action.
 With `--omit-unchanged-screen`, unchanged-screen turns using previous-response state can skip the full-screen image and send only current metadata plus any active crop images.
 
 By default RDPilot uses the real visible UI: keyboard, mouse, clipboard paste, screenshots, and UI Automation metadata. High-level local shortcuts such as `open_url`, `launch_app`, and `run_command` are disabled unless you explicitly enable them.
@@ -388,7 +410,7 @@ Keyboard shortcuts are batched into a single virtual-key `SendInput` sequence wh
 Simple key sequences such as repeated `tab` plus `enter` are also batched into one `SendInput` call when all keys map to virtual keys.
 Common key-name aliases such as `pgdn`, `del`, `ins`, and `arrowleft` are accepted to avoid aborting a run over naming differences.
 
-Loop guards stop runs that keep sending expensive model calls without visible progress. A separate proposal-level detector catches direct and multi-step cycles made only of actions rejected by local policy, so those loops cannot disappear merely because no input reached the desktop. Rejected-proposal history is cleared only after a non-observation action produces visible progress; `aim`, `point`, `request_crop`, or another ineffective action can no longer hide an alternating planning loop. For a `continuous` goal, an unchanged screen after an intentional `wait` is tracked as healthy idle time and does not increment stagnation or repeated-action guards; ineffective clicks, text input, navigation, and other mutations remain fully guarded. Set `--max-stagnation 0` or `--max-repeated-actions 0` only when a non-wait workflow genuinely needs it. Long `wait` actions are capped by `--max-wait`, and the action schema advertises that cap to the model.
+Loop guards stop runs that keep sending expensive model calls without visible progress. A separate proposal-level detector catches direct and multi-step cycles made only of actions rejected by local policy, so those loops cannot disappear merely because no input reached the desktop. Rejected-proposal history is cleared only after a non-observation action produces visible progress; `aim`, `point`, `request_crop`, or another ineffective action can no longer hide an alternating planning loop. The inspection guard additionally rejects a crop/point region already inspected since the last interaction and, by default, requires an interaction after two distinct inspections. One `aim` remains available to prepare a precise click or gesture, while `wait` does not reset the inspection budget. For a `continuous` goal, an unchanged screen after an intentional `wait` is tracked as healthy idle time and does not increment stagnation or repeated-action guards; ineffective clicks, text input, navigation, and other mutations remain fully guarded. Set `--max-stagnation 0` or `--max-repeated-actions 0` only when a non-wait workflow genuinely needs it. Long `wait` actions are capped by `--max-wait`, and the action schema advertises that cap to the model.
 Repeated-action detection distinguishes different `request_crop`/`point` regions, so useful visual refinement is not mistaken for the same ineffective action.
 Mouse clicks and double-clicks that land in the same small screen region are also clustered for repeat detection, so tiny coordinate changes do not let the model keep retrying an ineffective click.
 Recovery memory is enabled by default and stored in the versioned `memory\recovery-memory.json` next to the running executable, so it is shared by later goals and application launches. Writes use a cross-process lock, merge-on-write, retry-on-later-step, atomic replacement, and `recovery-memory.json.bak`; a corrupt primary file is restored from the backup. Success, failure, selection, reward, and reward-observation statistics use merge-safe per-writer components that are periodically compacted without losing totals. It starts an episode after repeated no-progress actions, a rejected-proposal cycle, or an earlier detected visual recurrence, and independently verifies before/after goal progress before learning a success.
@@ -404,7 +426,10 @@ With `--multi-monitor`, screenshots cover the Windows virtual desktop and action
 Learned lessons contain goal mode/domain/direction context, interaction domain, loop topology, semantic target tokens, structured strategy steps, preconditions, expected effects, verifier evidence, action cost, reward history, and model/prompt/application provenance. Retrieval uses a contextual-bandit score combining context similarity, reliability, reward, recency, uncertainty, exploration, and cost. Suggested steps carry an explicit strategy ID and sequence number, so success or failure is attributed deterministically instead of guessed from vague text. Repeated confirmed failures move a lesson into quarantine, where it becomes `NEGATIVE_MEMORY`; it can be revived by a later confirmed success or eventually removed by retention. Slow UIs receive a validation window before failure is recorded.
 The `drag_drop` action uses `bbox`/`x_px`/`y_px` for its source and `to_bbox`/`to_x_px`/`to_y_px` for its destination. `drag_duration_ms` is optional (default `500`, range `100..3000`), and all coordinates use the current screenshot's `SCREEN_SIZE` space before being mapped to the real desktop.
 Bounding boxes are validated (`right > left`, `bottom > top`), source and destination must differ, dragging includes a short press-before-motion delay, emergency cancellation is checked during motion, and button release is attempted even after failure.
-Local observation actions are not counted as UI stagnation, avoiding unnecessary adaptive effort escalation after `aim` or crop refinement.
+`drag_path` performs an atomic continuous pointer gesture for drawing, lasso selection, panning, sliders, and realtime gestures. It accepts 2..128 `{x_px,y_px}` points, a bounded `duration_ms`, and a `gesture_kind` hint; the executor resamples segments while preserving supplied corners, schedules every move against an absolute `Stopwatch` deadline, and always attempts to release the mouse button. Gesture logs record button-down, planned/sent movement counts, requested duration, and actual elapsed time. Consecutive `gesture_kind=draw` strokes may share one model response only when direct gestures are enabled and the canvas is stable; the batch is bounded to 180 points and 12 seconds, while pan/game/slider/lasso gestures retain an observation barrier. `drag_drop` remains the preferred semantic action for a simple source-to-destination transfer, while both actions share the same safe path executor internally.
+`hold_keys` atomically holds 1..4 individual keys for 100..5000 ms. Keys are pressed in order, released in reverse order, and released from a `finally` block after completion, error, or emergency cancellation. It is intentionally not exposed as separate key-down/key-up actions and is excluded from automatic action batching.
+Adaptive observation captures a clean baseline immediately before mutating input, so motion that occurred while the model was responding is not attributed to the action. A coarse global/foreground fingerprint remains the fast path; local gestures additionally use a bounded color fingerprint around their resolved path. Visual motion, action outcome, and goal progress are separate results, preventing background animation from automatically resetting stagnation while still detecting small persistent edits. Visible puzzle and board evidence selects `turn_based_interaction` before the first board action, automatically establishes the active window as a provisional interaction region, and permits an explicit playfield crop to refine it later. This removes the former crop and single-move calibration gate. Discrete inputs wait for a small local reaction and stable result, using both mean delta and changed-pixel ratio, while pixels that change without user input are excluded from state identity with a small spatial margin. Recurrent regions that change in a consistent way after user actions are learned separately as predictable auxiliary evidence, so counters, status indicators, and similar UI do not repeatedly masquerade as new world events. A compact `state + action -> result` ledger, labeled previous/current/reference images, localized change regions, focused before/after image pairs for novel components only, and bounded world-state/mechanics working memory are returned to the model so it can infer causal rules without task-specific hints. Completed help/instruction inspection round-trips are treated as productive observations instead of harmful loops. As soon as the provisional board state exists, aggressive execution-ready batching is the default: a reversible structured route with confidence at least `0.55` may execute up to twelve Arrow/WASD inputs immediately, and fixed visible directional controls may use a mixed click/key sequence. Every input is still observed locally, but a small distant or auxiliary change is retained as evidence without interrupting the route. A blocked input, unavailable observation, or broad screen/state transition stops the remaining inputs and requests a fresh decision. A turn action is placed on cooldown only after a repeated observed `no_effect`, rather than after the first uncertain miss. Persistent motion selects `realtime_interaction` only when the action and UI context indicate realtime control; discrete keys, text, clicks, and scrolling retain post-action settling even in an animated shell or application UI. Gesture assessments log their local delta, changed-pixel ratio, threshold, outcome, and progress even when verbose observation logging is disabled; settle logs label their cheap global measurement as `coarse_delta`.
+Local observation actions are not counted as ordinary UI stagnation, avoiding unnecessary adaptive effort escalation after useful `aim` or crop refinement; the separate inspection budget prevents them from forming an unbounded observation loop.
 When the verifier rejects `done`, its reason is promoted into the next control prompt as `LAST_VERIFY_REJECTION` instead of being buried only in the action history.
 When the local delta/repeat guard sees no visible progress, the next prompt includes an explicit strategy hint telling the model not to repeat the same action.
 
@@ -428,15 +453,15 @@ By default RDPilot minimizes its own console before control-loop screenshots and
 Ctrl+Alt+Q cancels in-flight OpenAI HTTP calls and retry backoff, so aborting a slow `gpt-5.6-luna` response no longer waits for the request timeout.
 The same abort token cancels long `wait`, verifier settle delay, batched waits, and post-action delays.
 After retryable OpenAI failures such as 5xx, timeout, or transport errors, the control loop keeps the goal alive for a small number of attempts instead of aborting after the first failed call. Non-retryable errors and parse errors still stop the goal.
-If a response completes as `status=incomplete` because `max_output_tokens` was spent before valid JSON was emitted, RDPilot first retries with a larger output cap at the same effort. Once the configured cap is reached (or the configured same-effort retry allowance is used), it lowers effort one step at a time through `max → xhigh → high → medium → low`. It returns an error only when no larger cap or lower effort remains; other errors do not trigger this fallback.
+If a response completes as `status=incomplete` because `max_output_tokens` was spent before valid JSON was emitted, a reasoning-capable request immediately retries at the next lower effort while preserving its token budget and context: `max → xhigh → high → medium → low`. It returns an error only if `low` also exhausts the budget. A model without a configured reasoning-effort ladder may instead expand its output cap within the configured retry count and cap; other errors do not trigger this fallback.
 Very long `paste_text` and `type_text` payloads are capped by schema so the model splits large content across multiple real-UI paste actions instead of emitting an oversized JSON response that can be truncated.
 If `paste_text` or `type_text` produces no visible screen change, the next prompts include `TEXT_INPUT_HINT`, telling the model to fix focus/editability or choose another visible UI route before repeating text input.
 After repeated no-change text-input attempts, RDPilot temporarily blocks further `paste_text`, `type_text`, and paste shortcuts so the model must establish focus/editability or choose another visible UI path first.
 
-`--batch-candidates` is intentionally disabled by default. In existing logs, extra JSON candidates can be alternate model answers rather than a safe sequence of next steps, so this mode should be tested per workflow before regular use.
-Duplicate parsed response candidates are ignored before warning or optional batching, reducing noise from APIs that expose the same JSON in multiple response fields.
-Parsed action candidates must contain a known action `type`, so Q&A/verifier payloads are not miscounted as control actions in replay or analysis.
-Optional batched follow-ups also skip duplicate action signatures, avoiding repeated text/keyboard actions from alternate candidates.
+Safe action batching is enabled by default. The control schema explicitly allows a bounded `actions` sequence. The executor accepts deterministic text-entry chains such as opening a text target, typing, committing with Enter, and optionally waiting, plus explicitly planned reversible turn-input sequences with a local observation barrier after every click or direction key. It validates follow-ups before queueing them and inserts transition delays so focus and dynamic suggestions are ready before text or Enter is sent. Navigation-like launch batches honor the full requested terminal wait, avoiding an early exit on a temporarily static loading frame. Before a coordinate-dependent turn input is executed without an established playfield crop, RDPilot compares the screen shown to the model with two fresh probes and discards the action when a different stable state appeared during API latency; reversible semantic keys are allowed to execute and provide evidence. A commit or wait is an observation barrier for ordinary batches. Use `--no-batch-candidates` to force one model action per screenshot.
+Duplicate parsed response payloads are ignored before warning, reducing noise from APIs that expose the same JSON in multiple response fields.
+Parsed action sequences must contain a known action `type`, so Q&A/verifier payloads are not miscounted as control actions in replay or analysis.
+Optional batched follow-ups also skip duplicate action signatures, avoiding repeated text/keyboard actions in one proposed sequence.
 `--analyze-logs` uses the same parsed-candidate deduplication, so multi-action counts better reflect genuine alternate actions.
 
 Use `--analyze-logs` to inspect previous runs and find slow calls, runtime metrics, request payload size, prompt text volume, model/token distribution, multi-action responses, largest screenshots, rejected verifier decisions, and HTTP errors.

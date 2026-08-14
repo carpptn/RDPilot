@@ -16,7 +16,8 @@
             double lastDelta,
             bool recordLearning = true,
             string goalMode = "finite",
-            bool recurringWorkflowIntent = false)
+            bool recurringWorkflowIntent = false,
+            GoalProgressState goalProgress = GoalProgressState.Unknown)
         {
             if (graph.PendingCandidateStep is int pendingCandidateStep &&
                 currentStep - pendingCandidateStep >
@@ -145,7 +146,11 @@
             graph.LastNodeId = node.Id;
             PruneStateGraph(graph);
 
-            var returnedToPriorState = isExistingNode && departedFromState && plausibleDistance;
+            var confirmedActionProgress = goalProgress == GoalProgressState.Progress;
+            var returnedToPriorState = isExistingNode &&
+                                       departedFromState &&
+                                       plausibleDistance &&
+                                       !confirmedActionProgress;
             var matchingSteps = node.RecentVisitSteps.ToArray();
             var consistentReturnPeriod = matchingSteps.Length >= 3 &&
                                          Math.Abs(
@@ -190,8 +195,12 @@
             var semanticCycle = departedFromSemanticState &&
                                 semanticCycleLength is >= 2 and <= 24 &&
                                 repeatedActionCycle &&
-                                (semanticVisits.Count >= 3 || semanticConsistentPeriod);
-            var unchangedLastStep = !double.IsNaN(lastDelta) && lastDelta < NoChangeThreshold;
+                                (semanticVisits.Count >= 3 || semanticConsistentPeriod) &&
+                                !confirmedActionProgress;
+            var unchangedLastStep = goalProgress == GoalProgressState.NoProgress ||
+                                    goalProgress == GoalProgressState.Unknown &&
+                                    !double.IsNaN(lastDelta) &&
+                                    lastDelta < NoChangeThreshold;
             var stateSimilarity = isExistingNode
                 ? Math.Clamp(
                     1.0 -
@@ -233,7 +242,9 @@
                 if (graph.PendingCandidateStep is int candidateStep &&
                     currentStep - candidateStep >= 3 &&
                     !double.IsNaN(lastDelta) &&
-                    lastDelta >= NoChangeThreshold)
+                    (goalProgress == GoalProgressState.Progress ||
+                     goalProgress == GoalProgressState.Unknown &&
+                     lastDelta >= NoChangeThreshold))
                 {
                     var outcome = graph.PendingCandidateWasActionable
                         ? "graph_candidate_intervened"
@@ -754,6 +765,9 @@
             ResolvedActionSnapshot? previousAction,
             bool unchangedLastStep)
         {
+            if (IsCompletedInspectionRoundTrip(recentActions, previousAction))
+                return true;
+
             if (!string.Equals(
                     goalMode,
                     "continuous",
@@ -795,6 +809,51 @@
                 @"\b(monitor|watch|observe|poll|check|refresh|status|health|incoming|new\s+event|monitoruj|obserwuj|sprawdź|sprawdzaj|odśwież|status|nowe\s+zdarzenie)\b",
                 RegexOptions.CultureInvariant);
             return hasObservationCadence || hasRecurringSemanticEvidence;
+        }
+
+        internal static bool IsCompletedInspectionRoundTrip(
+            IReadOnlyCollection<ResolvedActionSnapshot> recentActions,
+            ResolvedActionSnapshot? previousAction)
+        {
+            var actions = recentActions.TakeLast(10).ToList();
+            if (previousAction is not null &&
+                (actions.Count == 0 || !ReferenceEquals(actions[^1], previousAction)))
+            {
+                actions.Add(previousAction);
+            }
+            if (actions.Count < 3)
+                return false;
+
+            static string Intent(ResolvedActionSnapshot snapshot) =>
+                NormalizeText(
+                    $"{snapshot.Action.Note} {snapshot.Description} {snapshot.SemanticTokens}");
+            var inspectionEntryIndex = actions.FindIndex(action =>
+                Regex.IsMatch(
+                    Intent(action),
+                    @"\b(help|instruction\w*|guide|documentation|details|information|pomoc\w*|instrukcj\w*|wskazówk\w*|szczegół\w*|informacj\w*)\b",
+                    RegexOptions.CultureInvariant));
+            if (inspectionEntryIndex < 0)
+                return false;
+
+            var observedInspection = actions
+                .Skip(inspectionEntryIndex + 1)
+                .Any(action => action.Action.Type is
+                    "request_crop" or "point" or "aim" or "wait");
+            if (!observedInspection)
+                return false;
+
+            return actions
+                .Skip(inspectionEntryIndex + 1)
+                .TakeLast(3)
+                .Any(action =>
+                    Regex.IsMatch(
+                        Intent(action),
+                        @"\b(back|return\w*|close\w*|dismiss\w*|resume\w*|wróć\w*|powr\w*|zamkn\w*|wznów\w*)\b",
+                        RegexOptions.CultureInvariant) ||
+                    action.Action.Type == "keys" &&
+                    action.Action.Keys?.Any(key =>
+                        key.Equals("Escape", StringComparison.OrdinalIgnoreCase) ||
+                        key.Equals("BrowserBack", StringComparison.OrdinalIgnoreCase)) == true);
         }
 
         static bool IsTerminalProcess(string process) =>
