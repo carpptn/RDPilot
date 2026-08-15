@@ -1,9 +1,9 @@
 ﻿# RDPilot — AI‑Controlled Desktop Agent (Experimental)
 
-**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets an AI operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
+**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 10, Windows) that lets an AI operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
 
 * Best results so far with **`gpt-5.6`**; 
-* Designed for **Windows 10/11**, .NET **9** is required.
+* Designed for **Windows 10/11**, .NET **10** is required.
 
 
 > ⚠️ RDPilot captures and operates only the primary display by default. Multi-monitor virtual-desktop control is opt-in with `--multi-monitor`.
@@ -29,8 +29,8 @@
 ## Requirements
 
 * **Windows 10/11**
-* **.NET 9** runtime or SDK (**recommended**)
-* **.NET 9.0 Desktop Runtime (Windows Desktop Runtime)**
+* **.NET 10** runtime or SDK (**recommended**)
+* **.NET 10.0 Desktop Runtime (Windows Desktop Runtime)**
 * OpenAI API KEY
 
 ---
@@ -110,8 +110,8 @@ Relative paths supplied through recovery-memory and replay-corpus settings are a
 
 ## Quick start
 
-1. Install the **.NET 9** SDK or runtime.
-2. Install the **.NET 9** Desktop Runtime (Windows Desktop Runtime).
+1. Install the **.NET 10** SDK or runtime.
+2. Install the **.NET 10** Desktop Runtime (Windows Desktop Runtime).
 3. Set your OpenAI API key:
 
    * PowerShell: `setx OPENAI_API_KEY "sk-..."`
