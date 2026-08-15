@@ -1,12 +1,28 @@
 ﻿# RDPilot — AI‑Controlled Desktop Agent (Experimental)
 
-**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets a AI operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
+**RDPilot** is an experimental, vibe‑coded console app (C# / .NET 9, Windows) that lets an AI operate your desktop by looking at screenshots and emitting actions (keyboard, mouse, scroll, etc.).
 
 * Best results so far with **`gpt-5.6`**; 
 * Designed for **Windows 10/11**, .NET **9** is required.
 
 
 > ⚠️ RDPilot captures and operates only the primary display by default. Multi-monitor virtual-desktop control is opt-in with `--multi-monitor`.
+
+---
+
+## Contents
+
+* [Requirements](#requirements)
+* [What can it do?](#what-can-it-do)
+* [How it works](#how-it-works)
+* [Storage, output, and logs](#storage-output-and-logs)
+* [Quick start](#quick-start)
+* [Interactive and batch usage](#interactive-and-batch-usage)
+* [Configuration reference](#configuration-reference)
+* [`rdpilot.json`](#rdpilotjson)
+* [Runtime and observation profiles](#runtime-and-observation-profiles)
+* [Testing and diagnostics](#testing-and-diagnostics)
+* [Examples](#examples)
 
 ---
 
@@ -33,7 +49,7 @@ open Edge browser, go to Google.com, and search for the term 'life'
 
 **1. Task Retrieval (Prompt)**  
 The application first retrieves a **prompt** that defines the goal to be achieved (the task description for the model).  
-In the interactive console, `Up` and `Down` navigate the persistent prompt history, while `Left`, `Right`, `Home`, `End`, `Backspace`, and `Delete` edit the recalled line. Accepted tasks and `/ask` questions are stored in `%LOCALAPPDATA%\RDPilot\prompt-history.json`. Identical entries are deduplicated and moved to the newest position; the file retains up to 500 prompts.
+In the interactive console, `Up` and `Down` navigate the persistent prompt history, while `Left`, `Right`, `Home`, `End`, `Backspace`, and `Delete` edit the recalled line. Accepted tasks and `/ask` questions are stored in `memory\prompt-history.json` next to the running executable. Identical entries are deduplicated and moved to the newest position; the file retains up to 500 prompts. On first use, an existing `%LOCALAPPDATA%\RDPilot\prompt-history.json` is migrated automatically when the new destination does not yet exist.
 
 **2. Initial Screenshot & Model Input**  
 A screenshot of the primary screen—or the full virtual desktop when explicitly enabled—is captured.
@@ -75,9 +91,9 @@ For a finite goal, this process repeats until the model returns `done` and the v
 
 ---
 
-## Output & logs
+## Storage, output, and logs
 
-Logs are stored in the following folders:
+Runtime artifacts are always stored below the directory that contains the running `RDPilot.exe`, even when the process is started from another working directory:
 
 * **`/screens`**
   Full screenshots (`<id>_<step>.png`), optional **crop** images, **focus\_uia** crops, and **aim\_overlay** images.
@@ -88,9 +104,11 @@ Logs are stored in the following folders:
 * **`/memory`**
   Shared recovery memory (`recovery-memory.json`), its recovery backup, and loop-calibration telemetry used by later goals and later RDPilot launches.
 
+Relative paths supplied through recovery-memory and replay-corpus settings are also resolved from the executable directory. Explicit absolute paths remain unchanged. Interactive prompt history is stored with the other persistent artifacts in `memory\prompt-history.json`.
+
 ---
 
-## Setup
+## Quick start
 
 1. Install the **.NET 9** SDK or runtime.
 2. Install the **.NET 9** Desktop Runtime (Windows Desktop Runtime).
@@ -98,10 +116,60 @@ Logs are stored in the following folders:
 
    * PowerShell: `setx OPENAI_API_KEY "sk-..."`
    * Or export in your shell/session.
-4. Build or run:
+4. Build or run interactively:
 
    * Build: `dotnet build -c Release`
-   * Run:   `dotnet run --project .`  (or execute your built `.exe`)
+   * Run: `dotnet run --project RDPilot` (or execute the built `RDPilot.exe`)
+
+---
+
+## Interactive and batch usage
+
+### Interactive console
+
+Run `RDPilot.exe` without a task argument. RDPilot displays its prompt, keeps accepting tasks until `/exit`, and supports prompt-history navigation with `Up` and `Down`.
+
+### One task from PowerShell or cmd
+
+Use `--task` (alias `--goal`) to execute exactly one task and then terminate:
+
+```powershell
+& "C:\Apps\RDPilot\RDPilot.exe" --task "open Notepad and type hello"
+```
+
+The process inherits the caller's terminal, writes normal output to `stdout`, diagnostics and failures to `stderr`, does not display the interactive prompt, and does not hide or minimize the caller's console. Existing configuration flags can be combined with the task:
+
+```powershell
+RDPilot.exe --task "inspect the current screen" --model gpt-5.6-luna --effort max --no-web-search
+```
+
+`--batch` gives the same one-shot behavior to legacy positional task text:
+
+```powershell
+RDPilot.exe --batch "open Notepad and type hello"
+```
+
+Without `--batch`, positional task text retains the original behavior: it runs first and RDPilot then remains in the interactive console.
+
+### Multiline tasks and pipelines
+
+Read a UTF-8 task from a file with `--task-file`, or use `-` to read it from standard input:
+
+```powershell
+RDPilot.exe --task-file .\task.txt
+Get-Content .\task.txt -Raw | RDPilot.exe --task-file -
+```
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Task completed successfully |
+| `1` | API, parsing, execution, or other runtime failure |
+| `2` | Invalid invocation or missing API key |
+| `3` | A safety/loop guard stopped the control task |
+| `4` | The configured control-step limit was reached |
+| `130` | User cancellation (`Ctrl+Alt+Q`) |
 
 ---
 
@@ -111,11 +179,20 @@ Logs are stored in the following folders:
 
 ---
 
-## Environment variables & CLI flags
+## Configuration reference
+
+Configuration is applied in this order: code defaults, `rdpilot.json`, environment variables, and finally CLI flags. Profile flags provide a base, while explicit settings override the selected profile regardless of argument order.
+
+`web_search` is disabled by default. Enable it per run with `--allow-web-search`, `ALLOW_WEB_SEARCH=1`, or `"allowWebSearch": true`. When the model actually invokes it, the console and run log contain explicit `[web]` entries. It is available to control and `/ask` calls, but not to verifiers.
+
+### Environment variables and CLI flags
 
 | Purpose                   | Env var                                           | CLI flag                         | Notes |
 | ------------------------- | ------------------------------------------------- | -------------------------------- | ----- |
 | OpenAI API key            | `OPENAI_API_KEY`                                  | —                                | **Required** |
+| One-shot task             | —                                                 | `--task <text>` / `--goal <text>` | Runs exactly one task, then exits |
+| Task file or stdin        | —                                                 | `--task-file <path>` / `--task-file -` | Preserves multiline text; `-` reads redirected standard input |
+| Batch positional mode     | —                                                 | `--batch`                        | Gives legacy positional task text one-shot behavior |
 | Runtime profile           | `RDPILOT_PROFILE=custom/fast/balanced/quality`, `FAST_MODE=1`, `QUALITY_MODE=1` | `--profile <name>`, `--fast` / `--balanced` / `--quality` | Default `custom`, which preserves code defaults; `RDPILOT_PROFILE` overrides mode aliases |
 | Model                     | `OPENAI_MODEL=gpt-5.6-luna`                       | `--model <model>`                | Default `gpt-5.6-luna` |
 | Q&A model                 | `OPENAI_QA_MODEL=<model>`                         | `--qa-model <model>`             | Falls back to `--model` |
@@ -201,6 +278,7 @@ Logs are stored in the following folders:
 | Real UI only              | `REAL_UI_ONLY=1/0`                                | `--real-ui-only`                 | Forces local adapters off even if config/env enabled them |
 | High-level local actions  | `ALLOW_HIGH_LEVEL_ACTIONS=1/0`                    | `--allow-high-level-actions`     | Default off; real UI is the default |
 | Run commands              | `ALLOW_RUN_COMMAND=1/0`                           | `--allow-run-command`            | Default off |
+| Direct web search         | `ALLOW_WEB_SEARCH=1/0`                            | `--allow-web-search` / `--no-web-search` | Default off; optional hosted `web_search` for control and `/ask` requests is limited to 3 calls per response and actual use is logged with `[web]` entries |
 | Batch action sequences    | `EXECUTE_MULTI_ACTION_CANDIDATES=1/0`             | `--batch-candidates` / `--no-batch-candidates` | Default on; guarded launch/form-edit chains and bounded stable-canvas draw batches, with compact schemas, streaming, adaptive terminal waits, and observation barriers |
 | Max batch follow-ups      | `MAX_QUEUED_BATCH_ACTIONS=###`                    | `--max-batch-actions <n>`        | Default `4`; the schema permits the first action plus this many bounded follow-ups |
 | Turn-based batch inputs   | `TURN_BASED_MAX_BATCH_INPUTS=###`                 | `--turn-batch-inputs <n>`        | Default `32`; applies only to observed directional/click routes (`2..64`) |
@@ -225,25 +303,32 @@ Logs are stored in the following folders:
 
 ---
 
-## Config File
+## `rdpilot.json`
 
 RDPilot also reads `rdpilot.json` from the working directory or executable directory. Environment variables and CLI flags override it. Profile flags are applied as a base first, so explicit CLI settings such as `--history-chars` or `--uia-scan-ms` override the selected profile regardless of argument order.
 
-Example:
+Complete example (all 145 supported properties; values are illustrative and may override profile defaults):
+
+Internal run counters, temporary command state, and derived flags are intentionally not configuration settings.
 
 ```json
 {
   "profile": "fast",
   "model": "gpt-5.6-luna",
+  "apiUrl": "https://api.openai.com/v1/responses",
   "reasoningEffort": "max",
   "qaModel": "gpt-5-mini",
   "verifyModel": "gpt-5-mini",
   "qaReasoningEffort": "low",
   "verifyReasoningEffort": "low",
+  "mouseEnabled": true,
+  "multiMonitorEnabled": false,
+  "postActionDelayMs": 300,
   "maxSteps": 10000,
   "maxWaitSeconds": 30,
   "historyTailChars": 1200,
   "historyTailLines": 12,
+  "maxOutputTokens": 10000,
   "qaMaxOutputTokens": 300,
   "verifyMaxOutputTokens": 120,
   "turnReanalysisMaxOutputTokens": 10000,
@@ -252,18 +337,28 @@ Example:
   "maxActionTextChars": 3000,
   "qaScreenshotMaxWidth": 1024,
   "verifyScreenshotMaxWidth": 1024,
+  "textVerbosity": "low",
   "adaptiveReasoningEffort": true,
   "maxStagnationSteps": 8,
   "maxRepeatedActions": 5,
   "actionRepeatCooldownSteps": 2,
+  "maxRejectedProposalRepeats": 5,
   "maxConsecutiveInspectionActions": 2,
+  "ineffectiveMouseClusterPx": 96,
   "proactiveLoopConfidenceThreshold": 0.75,
   "maxModelFailures": 2,
   "maxActionFailures": 2,
   "goalMode": "auto",
   "observationProfile": "auto",
   "observationLogVerbose": false,
+  "noChangeThreshold": 0.005,
+  "aimExpireDelta": 0.08,
+  "maxGesturePathPoints": 128,
+  "maxGestureDurationMs": 5000,
+  "maxHeldKeys": 4,
+  "maxKeyHoldDurationMs": 5000,
   "recoveryMemory": true,
+  "recoveryMemoryPath": "memory\\recovery-memory.json",
   "recoveryMemoryTriggerSteps": 2,
   "recoveryMemoryValidationSteps": 2,
   "recoveryMemoryFailureLimit": 3,
@@ -280,6 +375,11 @@ Example:
   "recoveryProgressConfidenceThreshold": 0.68,
   "recoveryTelemetryMaxBytes": 5242880,
   "recoveryTelemetryRetainedFiles": 3,
+  "runtimeSemanticStateLimit": 256,
+  "runtimeGraphEdgeLimit": 512,
+  "runtimeRecoveryActionLimit": 64,
+  "runtimeCooldownEntryLimit": 256,
+  "graphCandidateTtlSteps": 24,
   "loopReplayAutoExport": true,
   "loopReplayCorpusPath": "memory\\loop-replay-corpus.json",
   "screenPolling": true,
@@ -292,19 +392,38 @@ Example:
   "sendInputRetryDelayMs": 30,
   "screenshotMaxWidth": 1280,
   "screenshotFormat": "jpeg",
+  "screenshotJpegQuality": 80,
   "focusedOverviewMaxWidth": 640,
   "cropMaxWidth": 768,
   "cropFormat": "jpeg",
   "screenLogFormat": "jpeg",
   "screenLogMaxWidth": 1280,
+  "gridStepPx": 0,
+  "gridLabelEveryPx": 100,
+  "gridMajorEveryPx": 100,
   "includeFocusUia": true,
+  "includeFocusUiaCrop": false,
+  "sendFocusCrop": true,
+  "focusRingPadding": 3,
+  "focusRingThickness": 2,
+  "focusGlowThickness": 3,
+  "focusCornerRadius": 6,
+  "largeFocusOverlayAreaRatio": 0.22,
+  "clickAimEdgeAdjustMaxAreaRatio": 0.22,
+  "clickAimEdgeMarginRatio": 0.18,
+  "clickAimEdgeMinMarginPx": 8,
+  "clickAimEdgeMaxMarginPx": 32,
+  "debugImages": false,
   "verifyMode": "auto",
   "verifyEarlySteps": 2,
   "verifyLowConfidenceThreshold": 0.75,
   "skipVerifyConfidenceThreshold": 0.92,
   "refreshScreenshotBeforeVerify": false,
+  "clipboardPasteThreshold": 120,
   "openAiTimeoutSeconds": 600,
+  "openAiMaxRetries": 2,
   "focusCropSize": 320,
+  "maxFocusUiaCropPixels": 160000,
   "promptCache": true,
   "promptCacheKey": "rdpilot-control-v1",
   "usePreviousResponseId": true,
@@ -315,10 +434,20 @@ Example:
   "omitUnchangedScreenImage": false,
   "realUiOnly": false,
   "allowHighLevelActions": false,
+  "allowRunCommand": false,
+  "allowWebSearch": false,
+  "directClickWithoutAim": true,
   "autoHideConsoleDuringRun": true,
+  "minimizeConsoleDuringRun": false,
   "restoreConsoleAfterRun": true,
+  "logRequests": true,
   "prettyRequestLogs": false,
+  "logScreens": true,
   "executeMultiActionCandidates": true,
+  "maxQueuedBatchActions": 4,
+  "turnBasedMaxBatchInputs": 32,
+  "maxBatchedGesturePoints": 180,
+  "maxBatchedGestureDurationMs": 12000,
   "includeUiaTargets": true,
   "maxUiaTargets": 20,
   "uiaTargetNameMaxChars": 48,
@@ -327,13 +456,16 @@ Example:
   "maxUiaNodesScanned": 400,
   "uiaCandidateMultiplier": 4,
   "uiaMaxAreaRatio": 0.45,
-  "reuseUiaTargetsWhenScreenUnchanged": true
+  "reuseUiaTargetsWhenScreenUnchanged": true,
+  "maxArtifactsPerDir": 500
 }
 ```
 
 ---
 
-## Profiles
+## Runtime and observation profiles
+
+### Runtime profiles
 
 * `custom` (default): preserves the values initialized in code unless config, environment variables, or CLI flags override them.
 * `fast`: requests at least `effort=low` without lowering a stronger configured effort, JPEG screenshots downscaled to 1280px, 640px full-screen overview when a focus crop is sent, JPEG crops up to 768px, JPEG screen logs up to 1280px, short output, short step history, adaptive verify, no debug overlays.
@@ -344,7 +476,12 @@ The control loop can temporarily raise reasoning effort to `medium`/`high` when 
 Use `--no-adaptive-effort` to keep `gpt-5.6-luna` on the configured effort for latency-sensitive runs.
 Q&A and verifier calls can use separate effort settings, so helper calls can use a deliberately lower effort when explicitly configured. Profiles do not lower a stronger configured helper effort. For helper calls, `default` is explicit: it omits `reasoning.effort` instead of falling back to the control-loop effort.
 
+### Adaptive observation profiles
+
 Runtime profiles are separate from adaptive observation profiles. `custom`/`fast`/`balanced`/`quality` configure cost, payload, and quality for the whole run. `ObservationProfile` describes the current screen situation and may change per action. Automatic observation starts at `general`, then uses `static_ui`, `local_editing`, `event_driven`, `streaming_output`, `turn_based_interaction`, or `realtime_interaction` when the evidence is strong enough. `turn_based_interaction` performs one discrete reversible input followed by observation, while realtime gestures and bounded key holds retain `realtime_interaction`. Console and run logs record each transition with its confidence and reason; replay telemetry additionally records the visual-change, action-outcome, and goal-progress assessments.
+
+### Model context, verification, and caching
+
 Verifier calls use a smaller output-token cap by default because they return only `yes`/`no` plus a short reason.
 Q&A and verifier calls can use their own smaller screenshot width, keeping helper calls cheaper than the main control loop.
 Verifier prompts keep `SCREEN_SIZE` aligned with the actual helper image after downscaling.
@@ -357,6 +494,8 @@ Control requests split stable user context from dynamic history/metadata, lettin
 Responses API `previous_response_id` is enabled by default. Each user goal gets a new control chain with `reasoning.context=all_turns`; the final verifier, recovery verifier, classifiers, and Q&A calls remain independent and use `current_turn` without the controller's response ID. The explicit action-history tail is omitted after the first chained turn, while fresh screenshots and authoritative runtime checkpoints are still sent.
 Long control tasks use server-side compaction at the configured high token threshold. If `context_management` is unavailable, RDPilot disables compaction for that task; if `previous_response_id` is rejected, it retries the same turn once from the application checkpoint without executing a duplicate action.
 With `--omit-unchanged-screen`, unchanged-screen turns using previous-response state can skip the full-screen image and send only current metadata plus any active crop images.
+
+### UI control and artifact performance
 
 By default RDPilot uses the real visible UI: keyboard, mouse, clipboard paste, screenshots, and UI Automation metadata. High-level local shortcuts such as `open_url`, `launch_app`, and `run_command` are disabled unless you explicitly enable them.
 Use `--real-ui-only` to force those local adapters back off even when an old config file or environment variable enabled them.
@@ -410,6 +549,8 @@ Keyboard shortcuts are batched into a single virtual-key `SendInput` sequence wh
 Simple key sequences such as repeated `tab` plus `enter` are also batched into one `SendInput` call when all keys map to virtual keys.
 Common key-name aliases such as `pgdn`, `del`, `ins`, and `arrowleft` are accepted to avoid aborting a run over naming differences.
 
+### Loop guards, memory, and replay learning
+
 Loop guards stop runs that keep sending expensive model calls without visible progress. A separate proposal-level detector catches direct and multi-step cycles made only of actions rejected by local policy, so those loops cannot disappear merely because no input reached the desktop. Rejected-proposal history is cleared only after a non-observation action produces visible progress; `aim`, `point`, `request_crop`, or another ineffective action can no longer hide an alternating planning loop. The inspection guard additionally rejects a crop/point region already inspected since the last interaction and, by default, requires an interaction after two distinct inspections. One `aim` remains available to prepare a precise click or gesture, while `wait` does not reset the inspection budget. For a `continuous` goal, an unchanged screen after an intentional `wait` is tracked as healthy idle time and does not increment stagnation or repeated-action guards; ineffective clicks, text input, navigation, and other mutations remain fully guarded. Set `--max-stagnation 0` or `--max-repeated-actions 0` only when a non-wait workflow genuinely needs it. Long `wait` actions are capped by `--max-wait`, and the action schema advertises that cap to the model.
 Repeated-action detection distinguishes different `request_crop`/`point` regions, so useful visual refinement is not mistaken for the same ineffective action.
 Mouse clicks and double-clicks that land in the same small screen region are also clustered for repeat detection, so tiny coordinate changes do not let the model keep retrying an ineffective click.
@@ -423,6 +564,8 @@ At the end of each run, telemetry-derived labels are merged into `memory\loop-re
 
 With `--multi-monitor`, screenshots cover the Windows virtual desktop and action coordinates are mapped through its true origin, including negative X/Y coordinates used by monitors placed left of or above the primary display. The model still receives a simple screenshot-local `SCREEN_SIZE` coordinate space. Primary-monitor-only behavior remains the default.
 
+### Gestures, games, and adaptive observation
+
 Learned lessons contain goal mode/domain/direction context, interaction domain, loop topology, semantic target tokens, structured strategy steps, preconditions, expected effects, verifier evidence, action cost, reward history, and model/prompt/application provenance. Retrieval uses a contextual-bandit score combining context similarity, reliability, reward, recency, uncertainty, exploration, and cost. Suggested steps carry an explicit strategy ID and sequence number, so success or failure is attributed deterministically instead of guessed from vague text. Repeated confirmed failures move a lesson into quarantine, where it becomes `NEGATIVE_MEMORY`; it can be revived by a later confirmed success or eventually removed by retention. Slow UIs receive a validation window before failure is recorded.
 The `drag_drop` action uses `bbox`/`x_px`/`y_px` for its source and `to_bbox`/`to_x_px`/`to_y_px` for its destination. `drag_duration_ms` is optional (default `500`, range `100..3000`), and all coordinates use the current screenshot's `SCREEN_SIZE` space before being mapped to the real desktop.
 Bounding boxes are validated (`right > left`, `bottom > top`), source and destination must differ, dragging includes a short press-before-motion delay, emergency cancellation is checked during motion, and button release is attempted even after failure.
@@ -433,7 +576,9 @@ Local observation actions are not counted as ordinary UI stagnation, avoiding un
 When the verifier rejects `done`, its reason is promoted into the next control prompt as `LAST_VERIFY_REJECTION` instead of being buried only in the action history.
 When the local delta/repeat guard sees no visible progress, the next prompt includes an explicit strategy hint telling the model not to repeat the same action.
 
-## Self-tests
+## Testing and diagnostics
+
+### Deterministic self-tests
 
 Run the deterministic regression suite without desktop interaction:
 
@@ -464,6 +609,8 @@ Parsed action sequences must contain a known action `type`, so Q&A/verifier payl
 Optional batched follow-ups also skip duplicate action signatures, avoiding repeated text/keyboard actions in one proposed sequence.
 `--analyze-logs` uses the same parsed-candidate deduplication, so multi-action counts better reflect genuine alternate actions.
 
+### Offline diagnostics and replay
+
 Use `--analyze-logs` to inspect previous runs and find slow calls, runtime metrics, request payload size, prompt text volume, model/token distribution, multi-action responses, largest screenshots, rejected verifier decisions, and HTTP errors.
 The analyzer reports input-token and cached-token totals, making prompt-cache hit rate visible after profile or prompt changes.
 Use `--replay-request <request.json> --replay-request-dry-run` to validate that a saved request can be reconstructed from its screenshot artifacts without touching the desktop. Without dry-run, RDPilot resends the hydrated request to OpenAI and writes a sibling `_replay_response.json`, which helps compare prompt/model/effort changes without operating the real UI.
@@ -481,6 +628,21 @@ Use `--loop-replay-import <reviewed-corpus.json>` to merge independently reviewe
 open Edge browser, go to Google.com, and search for the term 'life'
 ```
 
+### One-shot PowerShell task
+
+```powershell
+.\RDPilot.exe --task "open Edge browser and navigate to example.com" --effort max
+if ($LASTEXITCODE -ne 0) { Write-Error "RDPilot failed with exit code $LASTEXITCODE" }
+```
+
+### Batch file
+
+```bat
+@echo off
+"C:\Apps\RDPilot\RDPilot.exe" --task "open Notepad and type hello" --no-web-search
+if errorlevel 1 exit /b %errorlevel%
+```
+
 ### Faster `gpt-5.6-luna` run
 
 ```
@@ -491,6 +653,18 @@ dotnet run --project RDPilot -- --effort low "open Edge browser, go to Google.co
 
 ```
 /ask where do you see the Edge app icon?
+```
+
+The same question can run non-interactively:
+
+```powershell
+.\RDPilot.exe --task "/ask where do you see the Edge app icon?"
+```
+
+### Explicit web search
+
+```powershell
+.\RDPilot.exe --task "/ask find the current official .NET support policy" --allow-web-search
 ```
 
 ---

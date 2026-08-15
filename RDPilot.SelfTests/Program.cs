@@ -15,12 +15,15 @@ var tests = new (string Name, Action Run)[]
     ("multi-monitor control remains explicit opt-in", TestMultiMonitorOptIn),
     ("continuous goals cannot emit done", TestContinuousActionSchema),
     ("prompt history persists, deduplicates, and navigates", TestPromptHistory),
+    ("batch CLI parses one-shot tasks and stable exit codes", TestBatchCliParsing),
+    ("rdpilot.json exposes advanced Program tuning", TestAdvancedJsonTuning),
     ("gesture actions are exposed by the control schema", TestGestureActionSchema),
     ("action policies distinguish terminal and realtime input", TestActionPolicyResolution),
     ("drag paths are validated and mapped", TestDragPathMapping),
     ("drag paths inject a complete absolute mouse-move plan", TestDragPathInputPlan),
     ("control responses expose an explicit bounded action sequence", TestControlActionBatchSchema),
     ("control streaming accepts the first complete action sequence", TestControlActionStreaming),
+    ("web search is opt-in and its calls are counted once", TestWebSearchIntegration),
     ("control requests use persisted reasoning and high-threshold compaction", TestControlContextRequestOptions),
     ("control context chains restart safely and remain isolated", TestControlContextChainLifecycle),
     ("invalid response state falls back without losing request context", TestControlContextFallback),
@@ -722,6 +725,269 @@ static void TestControlActionStreaming()
             out _,
             out _),
         "stream was accepted early while previous_response_id state required completion");
+}
+
+static void TestWebSearchIntegration()
+{
+    var root = typeof(RDPilotApplication);
+    var allowField = root.GetField("AllowWebSearch", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var countField = root.GetField("RunWebSearchCalls", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var idsField = root.GetField("ReportedWebSearchCallIds", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var originalAllow = allowField.GetValue(null);
+    var originalCount = countField.GetValue(null);
+    var ids = (HashSet<string>)idsField.GetValue(null)!;
+
+    try
+    {
+        Assert(originalAllow is false, "web search is not disabled by default");
+        allowField.SetValue(null, true);
+        countField.SetValue(null, 0);
+        ids.Clear();
+
+        var request = new Dictionary<string, object>();
+        RDPilotApplication.PromptAndRequestFactory.AddWebSearchOptions(request);
+        var requestJson = System.Text.Json.JsonSerializer.Serialize(request);
+        Assert(requestJson.Contains("\"type\":\"web_search\"", StringComparison.Ordinal) &&
+               requestJson.Contains("\"tool_choice\":\"auto\"", StringComparison.Ordinal),
+            "enabled web search was not added to the request");
+        var rules = RDPilotApplication.PromptAndRequestFactory.BuildSystemRules();
+        Assert(rules.Contains("Web search is available", StringComparison.Ordinal) &&
+               rules.Contains("Do not search for ordinary UI operation", StringComparison.Ordinal),
+            "enabled web search was not constrained in the control prompt");
+
+        var searchingEvent = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            type = "response.web_search_call.searching",
+            item_id = "ws_test"
+        });
+        string? responseId = "resp_web";
+        Assert(!RDPilotApplication.OpenAiResponsesService.TryHandleControlStreamEvent(
+                searchingEvent,
+                allowEarlyAccept: false,
+                ref responseId,
+                out _,
+                out _,
+                out _),
+            "web search progress event unexpectedly completed the response");
+
+        var completedResponse = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            output = new object[]
+            {
+                new
+                {
+                    type = "web_search_call",
+                    id = "ws_test",
+                    action = new { type = "search", query = "current test fact" }
+                }
+            }
+        });
+        using var completedDocument = System.Text.Json.JsonDocument.Parse(completedResponse);
+        RDPilotApplication.OpenAiResponsesService.RecordWebSearchMetrics(completedDocument.RootElement);
+        Assert((int)countField.GetValue(null)! == 1,
+            "one streamed web search call was counted more than once");
+
+        allowField.SetValue(null, false);
+        var disabledRequest = new Dictionary<string, object>();
+        RDPilotApplication.PromptAndRequestFactory.AddWebSearchOptions(disabledRequest);
+        Assert(disabledRequest.Count == 0,
+            "disabled web search still modified the request");
+    }
+    finally
+    {
+        allowField.SetValue(null, originalAllow);
+        countField.SetValue(null, originalCount);
+        ids.Clear();
+    }
+}
+
+static void TestBatchCliParsing()
+{
+    var root = typeof(RDPilotApplication);
+    var batchField = root.GetField("BatchMode", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var errorField = root.GetField("CliArgumentError", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var modelField = root.GetField("Model", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var webField = root.GetField("AllowWebSearch", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var memoryPathField = root.GetField("RecoveryMemoryPath", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var archivePathField = root.GetField("RecoveryMemoryArchivePath", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var corpusPathField = root.GetField("LoopReplayCorpusPath", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var originals = new[]
+    {
+        batchField.GetValue(null),
+        errorField.GetValue(null),
+        modelField.GetValue(null),
+        webField.GetValue(null),
+        memoryPathField.GetValue(null),
+        archivePathField.GetValue(null),
+        corpusPathField.GetValue(null)
+    };
+
+    var tempRoot = Path.Combine(
+        Path.GetTempPath(),
+        "RDPilotSelfTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(tempRoot);
+    var taskFile = Path.Combine(tempRoot, "task.txt");
+    File.WriteAllText(taskFile, "first line\r\nsecond line");
+
+    try
+    {
+        batchField.SetValue(null, false);
+        errorField.SetValue(null, false);
+        webField.SetValue(null, false);
+        var task = RDPilotApplication.ConfigurationService.ApplyCliArgs(
+            ["--task", "open Paint", "--model", "gpt-test", "--allow-web-search"]);
+        Assert(task == "open Paint" &&
+               (bool)batchField.GetValue(null)! &&
+               !(bool)errorField.GetValue(null)! &&
+               (string)modelField.GetValue(null)! == "gpt-test" &&
+               (bool)webField.GetValue(null)!,
+            "--task did not enable one-shot batch mode alongside configuration flags");
+
+        batchField.SetValue(null, false);
+        errorField.SetValue(null, false);
+        var fileTask = RDPilotApplication.ConfigurationService.ApplyCliArgs(
+            ["--task-file", taskFile, "--no-web-search"]);
+        Assert(fileTask == "first line\r\nsecond line" &&
+               (bool)batchField.GetValue(null)! &&
+               !(bool)errorField.GetValue(null)! &&
+               !(bool)webField.GetValue(null)!,
+            "--task-file did not preserve a multiline task or batch mode");
+
+        Assert(RDPilotApplication.ControlRunExitCode(ControlRunOutcome.Completed) == 0 &&
+               RDPilotApplication.ControlRunExitCode(ControlRunOutcome.Failed) == 1 &&
+               RDPilotApplication.ControlRunExitCode(ControlRunOutcome.GuardStopped) == 3 &&
+               RDPilotApplication.ControlRunExitCode(ControlRunOutcome.StepLimitReached) == 4 &&
+               RDPilotApplication.ControlRunExitCode(ControlRunOutcome.Cancelled) == 130,
+            "batch control outcomes do not map to stable process exit codes");
+
+        Assert(Path.GetFullPath(RDPilotApplication.ArtifactStorageService.EnsureLogDir())
+                .StartsWith(Path.GetFullPath(AppContext.BaseDirectory), StringComparison.OrdinalIgnoreCase) &&
+               Path.GetFullPath(RDPilotApplication.ArtifactStorageService.EnsureScreensDir())
+                .StartsWith(Path.GetFullPath(AppContext.BaseDirectory), StringComparison.OrdinalIgnoreCase) &&
+               Path.GetFullPath(RDPilotApplication.ArtifactStorageService.EnsureRequestsDir())
+                .StartsWith(Path.GetFullPath(AppContext.BaseDirectory), StringComparison.OrdinalIgnoreCase),
+            "batch artifacts are not rooted beside the RDPilot executable");
+
+        memoryPathField.SetValue(null, "memory\\custom-memory.json");
+        archivePathField.SetValue(null, "memory\\custom-archive.json");
+        corpusPathField.SetValue(null, "memory\\custom-corpus.json");
+        Assert(RDPilotApplication.RecoveryMemoryService.EffectiveRecoveryMemoryPath() ==
+                   Path.Combine(AppContext.BaseDirectory, "memory", "custom-memory.json") &&
+               RDPilotApplication.RecoveryMemoryService.EffectiveRecoveryMemoryArchivePath() ==
+                   Path.Combine(AppContext.BaseDirectory, "memory", "custom-archive.json") &&
+               RDPilotApplication.RecoveryMemoryService.EffectiveLoopReplayCorpusPath() ==
+                   Path.Combine(AppContext.BaseDirectory, "memory", "custom-corpus.json"),
+            "relative durable-memory paths are not rooted beside the executable");
+    }
+    finally
+    {
+        batchField.SetValue(null, originals[0]);
+        errorField.SetValue(null, originals[1]);
+        modelField.SetValue(null, originals[2]);
+        webField.SetValue(null, originals[3]);
+        memoryPathField.SetValue(null, originals[4]);
+        archivePathField.SetValue(null, originals[5]);
+        corpusPathField.SetValue(null, originals[6]);
+        Directory.Delete(tempRoot, recursive: true);
+    }
+}
+
+static void TestAdvancedJsonTuning()
+{
+    var root = typeof(RDPilotApplication);
+    var expected = new Dictionary<string, object>
+    {
+        ["ApiUrl"] = "https://example.invalid/v1/responses",
+        ["SendFocusCrop"] = false,
+        ["FocusRingPadding"] = 9,
+        ["FocusRingThickness"] = 4,
+        ["FocusGlowThickness"] = 5,
+        ["FocusCornerRadius"] = 12,
+        ["LargeFocusOverlayAreaRatio"] = 0.31,
+        ["ClickAimEdgeAdjustMaxAreaRatio"] = 0.33,
+        ["ClickAimEdgeMarginRatio"] = 0.21,
+        ["ClickAimEdgeMinMarginPx"] = 11,
+        ["ClickAimEdgeMaxMarginPx"] = 45,
+        ["GridLabelEveryPx"] = 75,
+        ["GridMajorEveryPx"] = 150,
+        ["AimExpireDelta"] = 0.12,
+        ["NoChangeThreshold"] = 0.009,
+        ["MaxGesturePathPoints"] = 256,
+        ["MaxGestureDurationMs"] = 8000,
+        ["MaxHeldKeys"] = 6,
+        ["MaxKeyHoldDurationMs"] = 7000,
+        ["IneffectiveMouseClusterPx"] = 120,
+        ["MaxFocusUiaCropPixels"] = 250000,
+        ["MaxArtifactsPerDir"] = 321,
+        ["MaxBatchedGesturePoints"] = 333,
+        ["MaxBatchedGestureDurationMs"] = 15000
+    };
+    var fields = expected.Keys.ToDictionary(
+        name => name,
+        name => root.GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!);
+    var originals = fields.ToDictionary(pair => pair.Key, pair => pair.Value.GetValue(null));
+    var tempRoot = Path.Combine(
+        Path.GetTempPath(),
+        "RDPilotSelfTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(tempRoot);
+    var configPath = Path.Combine(tempRoot, "rdpilot.json");
+    File.WriteAllText(
+        configPath,
+        """
+        {
+          "apiUrl": "https://example.invalid/v1/responses",
+          "sendFocusCrop": false,
+          "focusRingPadding": 9,
+          "focusRingThickness": 4,
+          "focusGlowThickness": 5,
+          "focusCornerRadius": 12,
+          "largeFocusOverlayAreaRatio": 0.31,
+          "clickAimEdgeAdjustMaxAreaRatio": 0.33,
+          "clickAimEdgeMarginRatio": 0.21,
+          "clickAimEdgeMinMarginPx": 11,
+          "clickAimEdgeMaxMarginPx": 45,
+          "gridLabelEveryPx": 75,
+          "gridMajorEveryPx": 150,
+          "aimExpireDelta": 0.12,
+          "noChangeThreshold": 0.009,
+          "maxGesturePathPoints": 256,
+          "maxGestureDurationMs": 8000,
+          "maxHeldKeys": 6,
+          "maxKeyHoldDurationMs": 7000,
+          "ineffectiveMouseClusterPx": 120,
+          "maxFocusUiaCropPixels": 250000,
+          "maxArtifactsPerDir": 321,
+          "maxBatchedGesturePoints": 333,
+          "maxBatchedGestureDurationMs": 15000
+        }
+        """);
+
+    try
+    {
+        RDPilotApplication.ConfigurationService.ApplyConfigFile(configPath);
+        RDPilotApplication.ConfigurationService.NormalizeConfig();
+        foreach (var pair in expected)
+        {
+            var actual = fields[pair.Key].GetValue(null);
+            if (pair.Value is double expectedDouble)
+            {
+                Assert(actual is double actualDouble && Math.Abs(actualDouble - expectedDouble) < 0.000001,
+                    $"rdpilot.json did not apply {pair.Key}");
+            }
+            else
+            {
+                Assert(Equals(actual, pair.Value), $"rdpilot.json did not apply {pair.Key}");
+            }
+        }
+    }
+    finally
+    {
+        foreach (var pair in originals)
+            fields[pair.Key].SetValue(null, pair.Value);
+        Directory.Delete(tempRoot, recursive: true);
+    }
 }
 
 static void TestControlContextRequestOptions()
@@ -2772,6 +3038,10 @@ static void TestPromptHistory()
     var path = Path.Combine(root, "prompt-history.json");
     try
     {
+        Assert(RDPilotApplication.PromptHistoryService.EffectivePath() ==
+                   Path.Combine(AppContext.BaseDirectory, "memory", "prompt-history.json"),
+            "default prompt history is not stored beside the executable artifacts");
+
         var entries = RDPilotApplication.PromptHistoryService.NormalizeEntries(
             ["first", "second", "first", " third "]);
         Assert(entries.SequenceEqual(["second", "first", "third"]),
@@ -2794,6 +3064,16 @@ static void TestPromptHistory()
                navigation.Down("third") == "second" &&
                navigation.Down("second") == "draft",
             "Up/Down navigation did not preserve newest-first traversal and draft input");
+
+        var legacyPath = Path.Combine(root, "legacy", "RDPilot", "prompt-history.json");
+        var migratedPath = Path.Combine(root, "new", "memory", "prompt-history.json");
+        Assert(RDPilotApplication.PromptHistoryService.Save(entries, legacyPath) &&
+               RDPilotApplication.PromptHistoryService.TryMigrateLegacyHistory(
+                   legacyPath,
+                   migratedPath) &&
+               !File.Exists(legacyPath) &&
+               RDPilotApplication.PromptHistoryService.Load(migratedPath).SequenceEqual(entries),
+            "legacy prompt history was not safely moved to the artifact directory");
     }
     finally
     {

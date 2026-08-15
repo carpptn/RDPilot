@@ -12,6 +12,7 @@
                     : (AllowHighLevelActions || AllowRunCommand ? "real UI + enabled local adapters" : "real UI");
         
                 Console.WriteLine($"Profile: {RunProfile}");
+                Console.WriteLine($"Execution: {(BatchMode ? "batch" : "interactive")}");
                 Console.WriteLine($"Observation: mode={ObservationMode}; initial={(ObservationMode == "auto" ? "general" : ObservationMode)}; verbose_log={(ObservationLogVerbose ? "on" : "off")}");
                 Console.WriteLine($"Model: {Model}");
                 Console.WriteLine($"QA model: {EffectiveQaModel()}; verify model: {EffectiveVerifyModel()}");
@@ -28,6 +29,7 @@
                 Console.WriteLine($"Console: auto_hide={(AutoHideConsoleDuringRun ? "on" : "off")}; minimize_flag={(MinimizeConsoleDuringRun ? "on" : "off")}; restore_after_run={(RestoreConsoleAfterRun ? "on" : "off")}");
                 Console.WriteLine($"UIA targets: {(IncludeUiaTargets ? $"on/{MaxUiaTargets}; name_chars={UiaTargetNameMaxChars}; summary_chars={UiaSummaryMaxChars}; scan={UiaScanTimeBudgetMs}ms/{MaxUiaNodesScanned} nodes; candidates={UiaCandidateMultiplier}x; max_area={MaxUiaTargetAreaRatio:0.##}; reuse={(ReuseUiaTargetsWhenScreenUnchanged ? "on" : "off")}" : "off")}");
                 Console.WriteLine($"Local high-level actions: {(AllowHighLevelActions ? "enabled" : "disabled")}; run_command={(AllowRunCommand ? "enabled" : "disabled")}; real_ui_only={(ForceRealUiOnly ? "on" : "off")}");
+                Console.WriteLine($"Internet tools: web_search={(AllowWebSearch ? "enabled" : "disabled")}");
             }
 
             internal static void PrintStartupSummary()
@@ -161,6 +163,7 @@
                 ApplyBool(Environment.GetEnvironmentVariable("REAL_UI_ONLY"), "REAL_UI_ONLY", v => ForceRealUiOnly = v);
                 ApplyBool(Environment.GetEnvironmentVariable("ALLOW_HIGH_LEVEL_ACTIONS"), "ALLOW_HIGH_LEVEL_ACTIONS", v => AllowHighLevelActions = v);
                 ApplyBool(Environment.GetEnvironmentVariable("ALLOW_RUN_COMMAND"), "ALLOW_RUN_COMMAND", v => AllowRunCommand = v);
+                ApplyBool(Environment.GetEnvironmentVariable("ALLOW_WEB_SEARCH"), "ALLOW_WEB_SEARCH", v => AllowWebSearch = v);
                 ApplyBool(Environment.GetEnvironmentVariable("DIRECT_CLICK_WITHOUT_AIM"), "DIRECT_CLICK_WITHOUT_AIM", v => DirectClickWithoutAim = v);
                 ApplyBool(Environment.GetEnvironmentVariable("AUTO_HIDE_CONSOLE"), "AUTO_HIDE_CONSOLE", v => AutoHideConsoleDuringRun = v);
                 ApplyBool(Environment.GetEnvironmentVariable("MINIMIZE_CONSOLE_DURING_RUN"), "MINIMIZE_CONSOLE_DURING_RUN", v => MinimizeConsoleDuringRun = v);
@@ -222,12 +225,64 @@
             {
                 ApplyCliProfileArgs(args);
                 var positional = new List<string>();
+                string? explicitTask = null;
+
+                void SetExplicitTask(string value, string source)
+                {
+                    BatchMode = true;
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        CliArgumentError = true;
+                        return;
+                    }
+                    if (explicitTask is not null)
+                    {
+                        Console.Error.WriteLine($"Task was specified more than once; duplicate source: {source}.");
+                        CliArgumentError = true;
+                        return;
+                    }
+                    explicitTask = value;
+                }
         
                 for (var i = 0; i < args.Length; i++)
                 {
                     var arg = args[i];
                     if (string.IsNullOrWhiteSpace(arg))
                         continue;
+
+                    if (arg.Equals("--batch", StringComparison.OrdinalIgnoreCase))
+                    {
+                        BatchMode = true;
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--task", out var task) ||
+                        TryReadOption(args, ref i, "--goal", out task))
+                    {
+                        SetExplicitTask(task, arg);
+                        continue;
+                    }
+                    if (TryReadOption(args, ref i, "--task-file", out var taskFile))
+                    {
+                        BatchMode = true;
+                        if (string.IsNullOrWhiteSpace(taskFile))
+                        {
+                            CliArgumentError = true;
+                            continue;
+                        }
+                        try
+                        {
+                            var taskText = taskFile == "-"
+                                ? Console.In.ReadToEnd()
+                                : File.ReadAllText(Path.GetFullPath(taskFile));
+                            SetExplicitTask(taskText, arg);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"Could not read task file '{taskFile}': {ex.Message}");
+                            CliArgumentError = true;
+                        }
+                        continue;
+                    }
         
                     if (arg.Equals("--mouse", StringComparison.OrdinalIgnoreCase))
                     {
@@ -314,6 +369,16 @@
                     {
                         ForceRealUiOnly = false;
                         AllowHighLevelActions = true;
+                        continue;
+                    }
+                    if (arg.Equals("--allow-web-search", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AllowWebSearch = true;
+                        continue;
+                    }
+                    if (arg.Equals("--no-web-search", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AllowWebSearch = false;
                         continue;
                     }
                     if (arg.Equals("--no-direct-click", StringComparison.OrdinalIgnoreCase))
@@ -1011,13 +1076,21 @@
                     if (arg.StartsWith("--", StringComparison.Ordinal))
                     {
                         Console.Error.WriteLine($"Unknown option ignored: {arg}");
+                        CliArgumentError = true;
                         continue;
                     }
         
                     positional.Add(arg);
                 }
         
-                return positional.Count == 0 ? null : string.Join(" ", positional);
+                if (explicitTask is not null && positional.Count > 0)
+                {
+                    Console.Error.WriteLine("Positional task text cannot be combined with --task, --goal, or --task-file.");
+                    CliArgumentError = true;
+                }
+
+                return explicitTask ??
+                       (positional.Count == 0 ? null : string.Join(" ", positional));
             }
         
             internal static void NormalizeConfig()
@@ -1031,6 +1104,29 @@
                     IncludeFocusUiaCrop = false;
                 if (MaxUiaTargets <= 0)
                     IncludeUiaTargets = false;
+                FocusRingPadding = Math.Clamp(FocusRingPadding, 0, 100);
+                FocusRingThickness = Math.Clamp(FocusRingThickness, 1, 100);
+                FocusGlowThickness = Math.Clamp(FocusGlowThickness, 1, 100);
+                FocusCornerRadius = Math.Clamp(FocusCornerRadius, 0, 500);
+                LargeFocusOverlayAreaRatio = Math.Clamp(LargeFocusOverlayAreaRatio, 0.0, 1.0);
+                ClickAimEdgeAdjustMaxAreaRatio = Math.Clamp(ClickAimEdgeAdjustMaxAreaRatio, 0.0, 1.0);
+                ClickAimEdgeMarginRatio = Math.Clamp(ClickAimEdgeMarginRatio, 0.0, 1.0);
+                ClickAimEdgeMinMarginPx = Math.Clamp(ClickAimEdgeMinMarginPx, 0, 2000);
+                ClickAimEdgeMaxMarginPx = Math.Clamp(ClickAimEdgeMaxMarginPx, ClickAimEdgeMinMarginPx, 2000);
+                GridStepPx = Math.Max(0, GridStepPx);
+                GridLabelEveryPx = Math.Max(0, GridLabelEveryPx);
+                GridMajorEveryPx = Math.Max(0, GridMajorEveryPx);
+                AimExpireDelta = Math.Clamp(AimExpireDelta, 0.0, 1.0);
+                NoChangeThreshold = Math.Clamp(NoChangeThreshold, 0.0, 1.0);
+                MaxGesturePathPoints = Math.Clamp(MaxGesturePathPoints, 2, 1024);
+                MaxGestureDurationMs = Math.Clamp(MaxGestureDurationMs, 100, 60000);
+                MaxHeldKeys = Math.Clamp(MaxHeldKeys, 1, 16);
+                MaxKeyHoldDurationMs = Math.Clamp(MaxKeyHoldDurationMs, 100, 60000);
+                IneffectiveMouseClusterPx = Math.Clamp(IneffectiveMouseClusterPx, 8, 2000);
+                MaxFocusUiaCropPixels = Math.Max(0, MaxFocusUiaCropPixels);
+                MaxArtifactsPerDir = Math.Max(0, MaxArtifactsPerDir);
+                MaxBatchedGesturePoints = Math.Clamp(MaxBatchedGesturePoints, 2, 10000);
+                MaxBatchedGestureDurationMs = Math.Clamp(MaxBatchedGestureDurationMs, 100, 60000);
                 MaxSteps = Math.Max(0, MaxSteps);
                 MaxActionTextChars = Math.Max(256, MaxActionTextChars);
                 TurnReanalysisMaxOutputTokens = Math.Max(MaxOutputTokens, TurnReanalysisMaxOutputTokens);
@@ -1103,6 +1199,7 @@
                     if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                     {
                         Console.Error.WriteLine($"Missing value for {optionName}.");
+                        CliArgumentError = true;
                         return true;
                     }
         
@@ -1140,6 +1237,7 @@
         
                     if (TryGetString(root, "profile", out var profile)) ApplyProfile(profile);
                     if (TryGetString(root, "model", out var model)) Model = model;
+                    if (TryGetString(root, "apiUrl", out var apiUrl)) ApplyApiUrl(apiUrl, path);
                     if (TryGetString(root, "qaModel", out var qaModel)) QaModel = qaModel;
                     if (TryGetString(root, "verifyModel", out var verifyModel)) VerifyModel = verifyModel;
                     if (TryGetString(root, "reasoningEffort", out var effort)) ApplyReasoningEffort(effort, path);
@@ -1149,6 +1247,24 @@
                     if (TryGetBool(root, "multiMonitorEnabled", out var multiMonitorEnabled)) MultiMonitorEnabled = multiMonitorEnabled;
                     if (TryGetInt(root, "postActionDelayMs", out var delay)) UiSettleDelayMs = Math.Max(0, delay);
                     if (TryGetInt(root, "gridStepPx", out var grid)) GridStepPx = Math.Max(0, grid);
+                    if (TryGetInt(root, "gridLabelEveryPx", out var gridLabelEvery)) GridLabelEveryPx = Math.Max(0, gridLabelEvery);
+                    if (TryGetInt(root, "gridMajorEveryPx", out var gridMajorEvery)) GridMajorEveryPx = Math.Max(0, gridMajorEvery);
+                    if (TryGetBool(root, "sendFocusCrop", out var sendFocusCrop)) SendFocusCrop = sendFocusCrop;
+                    if (TryGetInt(root, "focusRingPadding", out var focusRingPadding)) FocusRingPadding = Math.Clamp(focusRingPadding, 0, 100);
+                    if (TryGetInt(root, "focusRingThickness", out var focusRingThickness)) FocusRingThickness = Math.Clamp(focusRingThickness, 1, 100);
+                    if (TryGetInt(root, "focusGlowThickness", out var focusGlowThickness)) FocusGlowThickness = Math.Clamp(focusGlowThickness, 1, 100);
+                    if (TryGetInt(root, "focusCornerRadius", out var focusCornerRadius)) FocusCornerRadius = Math.Clamp(focusCornerRadius, 0, 500);
+                    if (TryGetDouble(root, "largeFocusOverlayAreaRatio", out var largeFocusAreaRatio)) LargeFocusOverlayAreaRatio = Math.Clamp(largeFocusAreaRatio, 0.0, 1.0);
+                    if (TryGetDouble(root, "clickAimEdgeAdjustMaxAreaRatio", out var clickAimMaxAreaRatio)) ClickAimEdgeAdjustMaxAreaRatio = Math.Clamp(clickAimMaxAreaRatio, 0.0, 1.0);
+                    if (TryGetDouble(root, "clickAimEdgeMarginRatio", out var clickAimMarginRatio)) ClickAimEdgeMarginRatio = Math.Clamp(clickAimMarginRatio, 0.0, 1.0);
+                    if (TryGetInt(root, "clickAimEdgeMinMarginPx", out var clickAimMinMargin)) ClickAimEdgeMinMarginPx = Math.Clamp(clickAimMinMargin, 0, 2000);
+                    if (TryGetInt(root, "clickAimEdgeMaxMarginPx", out var clickAimMaxMargin)) ClickAimEdgeMaxMarginPx = Math.Clamp(clickAimMaxMargin, 0, 2000);
+                    if (TryGetDouble(root, "aimExpireDelta", out var aimExpireDelta)) AimExpireDelta = Math.Clamp(aimExpireDelta, 0.0, 1.0);
+                    if (TryGetDouble(root, "noChangeThreshold", out var noChangeThreshold)) NoChangeThreshold = Math.Clamp(noChangeThreshold, 0.0, 1.0);
+                    if (TryGetInt(root, "maxGesturePathPoints", out var maxGesturePoints)) MaxGesturePathPoints = Math.Clamp(maxGesturePoints, 2, 1024);
+                    if (TryGetInt(root, "maxGestureDurationMs", out var maxGestureDuration)) MaxGestureDurationMs = Math.Clamp(maxGestureDuration, 100, 60000);
+                    if (TryGetInt(root, "maxHeldKeys", out var maxHeldKeys)) MaxHeldKeys = Math.Clamp(maxHeldKeys, 1, 16);
+                    if (TryGetInt(root, "maxKeyHoldDurationMs", out var maxKeyHoldDuration)) MaxKeyHoldDurationMs = Math.Clamp(maxKeyHoldDuration, 100, 60000);
                     if (TryGetInt(root, "maxSteps", out var maxSteps)) MaxSteps = Math.Max(0, maxSteps);
                     if (TryGetInt(root, "maxWaitSeconds", out var maxWait)) MaxWaitSeconds = Math.Max(0, maxWait);
                     if (TryGetInt(root, "maxOutputTokens", out var maxOutput)) MaxOutputTokens = Math.Max(1, maxOutput);
@@ -1168,6 +1284,7 @@
                     if (TryGetInt(root, "actionRepeatCooldownSteps", out var repeatCooldown)) ActionRepeatCooldownSteps = Math.Max(0, repeatCooldown);
                     if (TryGetInt(root, "maxRejectedProposalRepeats", out var maxRejectedProposals)) MaxRejectedProposalRepeatsBeforeAbort = Math.Max(0, maxRejectedProposals);
                     if (TryGetInt(root, "maxConsecutiveInspectionActions", out var maxInspectionActions)) MaxConsecutiveInspectionActions = Math.Clamp(maxInspectionActions, 0, 20);
+                    if (TryGetInt(root, "ineffectiveMouseClusterPx", out var ineffectiveMouseCluster)) IneffectiveMouseClusterPx = Math.Clamp(ineffectiveMouseCluster, 8, 2000);
                     if (TryGetDouble(root, "skipVerifyConfidenceThreshold", out var skipVerifyConfidence)) SkipVerifyConfidenceThreshold = Math.Clamp(skipVerifyConfidence, 0.0, 1.0);
                     if (TryGetInt(root, "maxModelFailures", out var maxModelFailures)) MaxModelFailuresBeforeAbort = Math.Max(0, maxModelFailures);
                     if (TryGetInt(root, "maxActionFailures", out var maxActionFailures)) MaxActionFailuresBeforeAbort = Math.Max(0, maxActionFailures);
@@ -1226,11 +1343,13 @@
                     if (TryGetBool(root, "refreshScreenshotBeforeVerify", out var refreshBeforeVerify)) RefreshScreenshotBeforeVerify = refreshBeforeVerify;
                     if (TryGetInt(root, "clipboardPasteThreshold", out var pasteThreshold)) ClipboardPasteThreshold = Math.Max(0, pasteThreshold);
                     if (TryGetInt(root, "focusCropSize", out var focusCropSize)) FocusCropSize = Math.Clamp(focusCropSize, 64, 2000);
+                    if (TryGetInt(root, "maxFocusUiaCropPixels", out var maxFocusCropPixels)) MaxFocusUiaCropPixels = Math.Max(0, maxFocusCropPixels);
                     if (TryGetInt(root, "openAiMaxRetries", out var retries)) OpenAiMaxRetries = Math.Clamp(retries, 0, 10);
                     if (TryGetInt(root, "openAiTimeoutSeconds", out var timeoutSeconds)) OpenAiTimeoutSeconds = Math.Max(0, timeoutSeconds);
                     if (TryGetBool(root, "realUiOnly", out var realUiOnly)) ForceRealUiOnly = realUiOnly;
                     if (TryGetBool(root, "allowHighLevelActions", out var allowHighLevel)) AllowHighLevelActions = allowHighLevel;
                     if (TryGetBool(root, "allowRunCommand", out var allowRun)) AllowRunCommand = allowRun;
+                    if (TryGetBool(root, "allowWebSearch", out var allowWebSearch)) AllowWebSearch = allowWebSearch;
                     if (TryGetBool(root, "directClickWithoutAim", out var directClick)) DirectClickWithoutAim = directClick;
                     if (TryGetBool(root, "autoHideConsoleDuringRun", out var autoHideConsole)) AutoHideConsoleDuringRun = autoHideConsole;
                     if (TryGetBool(root, "minimizeConsoleDuringRun", out var minimize)) MinimizeConsoleDuringRun = minimize;
@@ -1255,6 +1374,9 @@
                     if (TryGetBool(root, "executeMultiActionCandidates", out var executeCandidates)) ExecuteMultiActionCandidates = executeCandidates;
                     if (TryGetInt(root, "maxQueuedBatchActions", out var maxQueued)) MaxQueuedBatchActions = Math.Clamp(maxQueued, 0, 20);
                     if (TryGetInt(root, "turnBasedMaxBatchInputs", out var turnBatchInputs)) TurnBasedMaxBatchInputs = Math.Clamp(turnBatchInputs, 2, 64);
+                    if (TryGetInt(root, "maxBatchedGesturePoints", out var maxBatchedGesturePoints)) MaxBatchedGesturePoints = Math.Clamp(maxBatchedGesturePoints, 2, 10000);
+                    if (TryGetInt(root, "maxBatchedGestureDurationMs", out var maxBatchedGestureDuration)) MaxBatchedGestureDurationMs = Math.Clamp(maxBatchedGestureDuration, 100, 60000);
+                    if (TryGetInt(root, "maxArtifactsPerDir", out var maxArtifacts)) MaxArtifactsPerDir = Math.Max(0, maxArtifacts);
                     if (TryGetBool(root, "logRequests", out var logRequests)) LogRequests = logRequests;
                     if (TryGetBool(root, "prettyRequestLogs", out var prettyRequestLogs)) PrettyRequestLogs = prettyRequestLogs;
                     if (TryGetBool(root, "logScreens", out var logScreens)) LogScreens = logScreens;
@@ -1608,6 +1730,21 @@
                     source,
                     v => ReasoningEffort = v,
                     () => ReasoningEffortExplicit = true);
+            }
+
+            internal static void ApplyApiUrl(string? value, string source)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return;
+
+                if (Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri) &&
+                    uri.Scheme is "http" or "https")
+                {
+                    ApiUrl = uri.AbsoluteUri;
+                    return;
+                }
+
+                Console.Error.WriteLine($"Invalid API URL '{value}' from {source}; expected an absolute HTTP or HTTPS URL.");
             }
         
             internal static void ApplyReasoningEffort(string? value, string source, Action<string?> setter, Action? markExplicit = null)

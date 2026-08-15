@@ -8,7 +8,7 @@
         internal static string EffectiveRecoveryMemoryPath()
         {
             if (!string.IsNullOrWhiteSpace(RecoveryMemoryPath))
-                return Path.GetFullPath(Environment.ExpandEnvironmentVariables(RecoveryMemoryPath.Trim()));
+                return ResolveApplicationPath(RecoveryMemoryPath);
 
             return Path.Combine(AppContext.BaseDirectory, "memory", "recovery-memory.json");
         }
@@ -16,11 +16,7 @@
         internal static string EffectiveLoopReplayCorpusPath()
         {
             if (!string.IsNullOrWhiteSpace(LoopReplayCorpusPath))
-            {
-                return Path.GetFullPath(
-                    Environment.ExpandEnvironmentVariables(
-                        LoopReplayCorpusPath.Trim()));
-            }
+                return ResolveApplicationPath(LoopReplayCorpusPath);
 
             var directory = Path.GetDirectoryName(EffectiveRecoveryMemoryPath())
                             ?? AppContext.BaseDirectory;
@@ -831,11 +827,7 @@
         internal static string EffectiveRecoveryMemoryArchivePath()
         {
             if (!string.IsNullOrWhiteSpace(RecoveryMemoryArchivePath))
-            {
-                return Path.GetFullPath(
-                    Environment.ExpandEnvironmentVariables(
-                        RecoveryMemoryArchivePath.Trim()));
-            }
+                return ResolveApplicationPath(RecoveryMemoryArchivePath);
 
             var primary = EffectiveRecoveryMemoryPath();
             var directory = Path.GetDirectoryName(primary)
@@ -844,6 +836,14 @@
             return Path.Combine(
                 directory,
                 $"{name}-archive.json");
+        }
+
+        internal static string ResolveApplicationPath(string path)
+        {
+            var expanded = Environment.ExpandEnvironmentVariables(path.Trim());
+            return Path.IsPathFullyQualified(expanded)
+                ? Path.GetFullPath(expanded)
+                : Path.GetFullPath(expanded, AppContext.BaseDirectory);
         }
 
         static bool ArchiveRecoveryLessonsWithoutLock(

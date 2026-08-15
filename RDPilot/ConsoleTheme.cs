@@ -117,6 +117,8 @@ internal static class ConsoleTheme
             if (text.StartsWith("[openai]", StringComparison.Ordinal) ||
                 text.StartsWith("OpenAI", StringComparison.Ordinal))
                 return ConsoleColor.Cyan;
+            if (text.StartsWith("[web]", StringComparison.Ordinal))
+                return ConsoleColor.Blue;
             if (text.StartsWith("[shot]", StringComparison.Ordinal) ||
                 text.StartsWith("[coords]", StringComparison.Ordinal) ||
                 text.StartsWith("[crop]", StringComparison.Ordinal) ||

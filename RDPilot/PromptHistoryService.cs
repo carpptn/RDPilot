@@ -41,6 +41,12 @@ internal static partial class RDPilotApplication
 
         internal static string EffectivePath() =>
             Path.Combine(
+                AppContext.BaseDirectory,
+                "memory",
+                "prompt-history.json");
+
+        internal static string LegacyPath() =>
+            Path.Combine(
                 Environment.GetFolderPath(
                     Environment.SpecialFolder.LocalApplicationData),
                 "RDPilot",
@@ -48,7 +54,12 @@ internal static partial class RDPilotApplication
 
         internal static List<string> Load(string? path = null)
         {
-            path ??= EffectivePath();
+            if (path is null)
+            {
+                path = EffectivePath();
+                if (!File.Exists(path))
+                    TryMigrateLegacyHistory(LegacyPath(), path);
+            }
             if (!File.Exists(path))
                 return [];
 
@@ -86,7 +97,7 @@ internal static partial class RDPilotApplication
             Save(entries, path);
         }
 
-        internal static void Save(
+        internal static bool Save(
             IReadOnlyCollection<string> entries,
             string? path = null)
         {
@@ -109,11 +120,53 @@ internal static partial class RDPilotApplication
                     json,
                     new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
                 File.Move(temporaryPath, path, overwrite: true);
+                return true;
             }
             catch (Exception ex)
             {
                 Console.WriteLine(
                     $"[history] could not save {path}: {ex.Message}");
+                return false;
+            }
+        }
+
+        internal static bool TryMigrateLegacyHistory(
+            string legacyPath,
+            string destinationPath)
+        {
+            if (!File.Exists(legacyPath) || File.Exists(destinationPath))
+                return false;
+
+            try
+            {
+                var document = JsonSerializer.Deserialize<PromptHistoryDocument>(
+                    File.ReadAllText(legacyPath),
+                    PrettyJson);
+                if (document is null)
+                    return false;
+
+                var entries = NormalizeEntries(document.Prompts);
+                if (!Save(entries, destinationPath) || !File.Exists(destinationPath))
+                    return false;
+
+                File.Delete(legacyPath);
+                var legacyDirectory = Path.GetDirectoryName(legacyPath);
+                if (!string.IsNullOrWhiteSpace(legacyDirectory) &&
+                    Directory.Exists(legacyDirectory) &&
+                    !Directory.EnumerateFileSystemEntries(legacyDirectory).Any())
+                {
+                    Directory.Delete(legacyDirectory);
+                }
+
+                Console.WriteLine(
+                    $"[history] migrated {entries.Count} prompt(s) to {destinationPath}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[history] could not migrate {legacyPath}: {ex.Message}");
+                return false;
             }
         }
 

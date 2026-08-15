@@ -14,7 +14,7 @@ internal static partial class RDPilotApplication
     static bool VerifyReasoningEffortExplicit = true;
     static string? QaModel = null;
     static string? VerifyModel = null;
-    const string ApiUrl = "https://api.openai.com/v1/responses";
+    static string ApiUrl = "https://api.openai.com/v1/responses";
     
     const int MaxStepsDefault = 10000;
     static int MaxSteps = MaxStepsDefault;
@@ -33,15 +33,15 @@ internal static partial class RDPilotApplication
     static int FocusCropSize = 320;                     // px
 
     // Focus overlay (look)
-    const int FocusRingPadding = 3;
-    const int FocusRingThickness = 2;
-    const int FocusGlowThickness = 3;
-    const int FocusCornerRadius = 6;
-    const double LargeFocusOverlayAreaRatio = 0.22;
-    const double ClickAimEdgeAdjustMaxAreaRatio = 0.22;
-    const double ClickAimEdgeMarginRatio = 0.18;
-    const int ClickAimEdgeMinMarginPx = 8;
-    const int ClickAimEdgeMaxMarginPx = 32;
+    static int FocusRingPadding = 3;
+    static int FocusRingThickness = 2;
+    static int FocusGlowThickness = 3;
+    static int FocusCornerRadius = 6;
+    static double LargeFocusOverlayAreaRatio = 0.22;
+    static double ClickAimEdgeAdjustMaxAreaRatio = 0.22;
+    static double ClickAimEdgeMarginRatio = 0.18;
+    static int ClickAimEdgeMinMarginPx = 8;
+    static int ClickAimEdgeMaxMarginPx = 32;
 
     // === Grid overlay on screenshots ===
     static int GridStepPx = 0;          // 0 = off; e.g., 100 = lines every 100 px
@@ -49,16 +49,16 @@ internal static partial class RDPilotApplication
     static int GridMajorEveryPx = 100;  // thicker line every N px
 
     // AIM expiration after a large visual change
-    const double AimExpireDelta = 0.08;
+    static double AimExpireDelta = 0.08;
 
     // Stagnation / verification
-    const double NoChangeThreshold = 0.005;             // 0..1 (avg pixel diff after downsampling)
+    static double NoChangeThreshold = 0.005;            // 0..1 (avg pixel diff after downsampling)
     static string ObservationMode = "auto";             // auto | general | static_ui | local_editing | event_driven | streaming_output | realtime_interaction
     static bool ObservationLogVerbose = false;
-    const int MaxGesturePathPoints = 128;
-    const int MaxGestureDurationMs = 5_000;
-    const int MaxHeldKeys = 4;
-    const int MaxKeyHoldDurationMs = 5_000;
+    static int MaxGesturePathPoints = 128;
+    static int MaxGestureDurationMs = 5_000;
+    static int MaxHeldKeys = 4;
+    static int MaxKeyHoldDurationMs = 5_000;
 
     // Speed/quality profile
     static string RunProfile = "custom";                // custom | fast | balanced | quality
@@ -147,6 +147,9 @@ internal static partial class RDPilotApplication
     static bool ForceRealUiOnly = false;
     static bool AllowHighLevelActions = false;
     static bool AllowRunCommand = false;
+    static bool AllowWebSearch = false;
+    static bool BatchMode = false;
+    static bool CliArgumentError = false;
     static bool DirectClickWithoutAim = true;
     static bool AutoHideConsoleDuringRun = true;
     static bool MinimizeConsoleDuringRun = false;
@@ -190,6 +193,7 @@ internal static partial class RDPilotApplication
     static long RunOpenAiRequestBytes = 0;
     static long RunOpenAiBytes = 0;
     static int RunMultiCandidateResponses = 0;
+    static int RunWebSearchCalls = 0;
     static long RunInputTokens = 0;
     static long RunCachedTokens = 0;
     static long RunOutputTokens = 0;
@@ -233,131 +237,199 @@ internal static partial class RDPilotApplication
         "request_crop", "point", "aim", "wait", "done"
     };
     static readonly HashSet<string> ReportedSanityWarnings = new(StringComparer.OrdinalIgnoreCase);
+    static readonly HashSet<string> ReportedWebSearchCallIds = new(StringComparer.Ordinal);
 
-    static async Task Main(string[] args)
+    static async Task<int> Main(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
-        ConsoleTheme.Enable();
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => ReleaseAllHeldKeys();
+        try
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            ConsoleTheme.Enable();
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => ReleaseAllHeldKeys();
 
-        ApplyEnvironmentConfig();
-        string? pending = ApplyCliArgs(args);
-        NormalizeConfig();
-        ConfigureOpenAiHttpClient();
+            ApplyEnvironmentConfig();
+            string? pending = ApplyCliArgs(args);
+            NormalizeConfig();
+            ConfigureOpenAiHttpClient();
 
-        if (PrintConfigOnly)
-        {
-            PrintEffectiveConfig();
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(RecoveryMemoryCommand))
-        {
-            ExecuteRecoveryMemoryMaintenance(
-                RecoveryMemoryCommand,
-                RecoveryMemoryExportPath);
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(LoopReplayPath))
-        {
-            ExecuteLoopReplay(LoopReplayPath);
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(LoopReplayImportPath))
-        {
-            ImportIndependentLoopReplayCorpus(LoopReplayImportPath);
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(LoopReplayExportPath))
-        {
-            ExportLoopTelemetryToReplayCorpus(LoopReplayExportPath);
-            return;
-        }
-        if (AnalyzeLogsOnly)
-        {
-            AnalyzeArtifacts();
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(ReplayResponsePath))
-        {
-            ReplayResponse(ReplayResponsePath);
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(ReplayRequestPath) && ReplayRequestDryRun)
-        {
-            await ReplayRequestAsync(null, ReplayRequestPath, dryRun: true);
-            return;
-        }
+            if (BatchMode && CliArgumentError)
+                return 2;
 
-        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            Console.Write("Enter OPENAI_API_KEY: ");
-            apiKey = Console.ReadLine();
+            if (PrintConfigOnly)
+            {
+                PrintEffectiveConfig();
+                return 0;
+            }
+            if (!string.IsNullOrWhiteSpace(RecoveryMemoryCommand))
+            {
+                ExecuteRecoveryMemoryMaintenance(
+                    RecoveryMemoryCommand,
+                    RecoveryMemoryExportPath);
+                return 0;
+            }
+            if (!string.IsNullOrWhiteSpace(LoopReplayPath))
+            {
+                ExecuteLoopReplay(LoopReplayPath);
+                return 0;
+            }
+            if (!string.IsNullOrWhiteSpace(LoopReplayImportPath))
+            {
+                ImportIndependentLoopReplayCorpus(LoopReplayImportPath);
+                return 0;
+            }
+            if (!string.IsNullOrWhiteSpace(LoopReplayExportPath))
+            {
+                ExportLoopTelemetryToReplayCorpus(LoopReplayExportPath);
+                return 0;
+            }
+            if (AnalyzeLogsOnly)
+            {
+                AnalyzeArtifacts();
+                return 0;
+            }
+            if (!string.IsNullOrWhiteSpace(ReplayResponsePath))
+            {
+                ReplayResponse(ReplayResponsePath);
+                return 0;
+            }
+            if (!string.IsNullOrWhiteSpace(ReplayRequestPath) && ReplayRequestDryRun)
+            {
+                await ReplayRequestAsync(null, ReplayRequestPath, dryRun: true);
+                return 0;
+            }
+
+            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
             if (string.IsNullOrWhiteSpace(apiKey))
             {
-                Console.Error.WriteLine("Missing API key.");
-                return;
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(ReplayRequestPath))
-        {
-            await ReplayRequestAsync(apiKey!, ReplayRequestPath, dryRun: false);
-            return;
-        }
-
-        try { SetProcessDpiAwarenessContext((nint)(-4)); } catch { /* best effort */ }
-
-        PrintStartupSummary();
-        var promptHistory = PromptHistoryService.Load();
-        Console.WriteLine(
-            "Enter a task or question. Use Up/Down for prompt history, '/ask ' for Q&A, and '/exit' to quit.");
-        Console.WriteLine(
-            $"Prompt history: {PromptHistoryService.EffectivePath()} ({promptHistory.Count} entries)\n");
-
-        while (true)
-        {
-            string goal;
-            if (!string.IsNullOrEmpty(pending))
-            {
-                goal = pending!;
-                pending = null;
-                Console.WriteLine($"Command (from args): {goal}");
-            }
-            else
-            {
-                goal = PromptHistoryService.ReadLine(
-                    "Command/Question: ",
-                    promptHistory);
-            }
-
-            if (string.IsNullOrWhiteSpace(goal) || goal.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
-                break;
-
-            PromptHistoryService.Remember(promptHistory, goal);
-
-            if (IsQuestion(goal))
-            {
-                await RunAskOnce(apiKey!, goal);
-                Console.WriteLine();
-                Console.WriteLine("✅ Answer completed. Enter next (ENTER = exit).");
-            }
-            else
-            {
-                var result = await RunOnce(apiKey!, goal);
-                Console.WriteLine();
-                var marker = result.Outcome switch
+                if (BatchMode || Console.IsInputRedirected)
                 {
-                    ControlRunOutcome.Completed => "✅",
-                    ControlRunOutcome.Cancelled => "⏹",
-                    ControlRunOutcome.GuardStopped => "🛑",
-                    ControlRunOutcome.StepLimitReached => "⏱",
-                    _ => "❌"
-                };
-                Console.WriteLine(
-                    $"{marker} {result.Outcome}: {result.Message} " +
-                    $"(step={result.Step}). Enter next (ENTER = exit).");
+                    Console.Error.WriteLine("Missing OPENAI_API_KEY.");
+                    return 2;
+                }
+
+                Console.Write("Enter OPENAI_API_KEY: ");
+                apiKey = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(apiKey))
+                {
+                    Console.Error.WriteLine("Missing API key.");
+                    return 2;
+                }
             }
+
+            if (!string.IsNullOrWhiteSpace(ReplayRequestPath))
+            {
+                await ReplayRequestAsync(apiKey!, ReplayRequestPath, dryRun: false);
+                return 0;
+            }
+
+            try { SetProcessDpiAwarenessContext((nint)(-4)); } catch { /* best effort */ }
+
+            PrintStartupSummary();
+            if (BatchMode)
+                return await RunBatchTaskAsync(apiKey!, pending);
+
+            var promptHistory = PromptHistoryService.Load();
+            Console.WriteLine(
+                "Enter a task or question. Use Up/Down for prompt history, '/ask ' for Q&A, and '/exit' to quit.");
+            Console.WriteLine(
+                $"Prompt history: {PromptHistoryService.EffectivePath()} ({promptHistory.Count} entries)\n");
+
+            while (true)
+            {
+                string goal;
+                if (!string.IsNullOrEmpty(pending))
+                {
+                    goal = pending!;
+                    pending = null;
+                    Console.WriteLine($"Command (from args): {goal}");
+                }
+                else
+                {
+                    goal = PromptHistoryService.ReadLine(
+                        "Command/Question: ",
+                        promptHistory);
+                }
+
+                if (string.IsNullOrWhiteSpace(goal) || goal.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
+                    break;
+
+                PromptHistoryService.Remember(promptHistory, goal);
+
+                if (IsQuestion(goal))
+                {
+                    await RunAskOnce(apiKey!, goal);
+                    Console.WriteLine();
+                    Console.WriteLine("✅ Answer completed. Enter next (ENTER = exit).");
+                }
+                else
+                {
+                    var result = await RunOnce(apiKey!, goal);
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"{ControlRunMarker(result.Outcome)} {result.Outcome}: {result.Message} " +
+                        $"(step={result.Step}). Enter next (ENTER = exit).");
+                }
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"RDPilot failed: {ex.Message}");
+            return 1;
         }
     }
+
+    internal static async Task<int> RunBatchTaskAsync(string apiKey, string? task)
+    {
+        if (string.IsNullOrWhiteSpace(task) ||
+            task.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("Batch mode requires a non-empty task. Use --task <text>, --task-file <path>, or --batch with a positional task.");
+            return 2;
+        }
+
+        var goal = task.Trim();
+        Console.WriteLine($"[batch] task={goal}");
+        if (IsQuestion(goal))
+        {
+            var answered = await RunAskOnce(apiKey, goal);
+            if (answered)
+            {
+                Console.WriteLine("[batch] completed");
+                return 0;
+            }
+
+            Console.Error.WriteLine(CancelRequested
+                ? "[batch] cancelled"
+                : "[batch] failed: no answer was returned");
+            return CancelRequested ? 130 : 1;
+        }
+
+        var result = await RunOnce(apiKey, goal);
+        var summary = $"[batch] {result.Outcome}: {result.Message} (step={result.Step})";
+        if (result.Completed)
+            Console.WriteLine(summary);
+        else
+            Console.Error.WriteLine(summary);
+        return ControlRunExitCode(result.Outcome);
+    }
+
+    internal static int ControlRunExitCode(ControlRunOutcome outcome) => outcome switch
+    {
+        ControlRunOutcome.Completed => 0,
+        ControlRunOutcome.Cancelled => 130,
+        ControlRunOutcome.GuardStopped => 3,
+        ControlRunOutcome.StepLimitReached => 4,
+        _ => 1
+    };
+
+    internal static string ControlRunMarker(ControlRunOutcome outcome) => outcome switch
+    {
+        ControlRunOutcome.Completed => "✅",
+        ControlRunOutcome.Cancelled => "⏹",
+        ControlRunOutcome.GuardStopped => "🛑",
+        ControlRunOutcome.StepLimitReached => "⏱",
+        _ => "❌"
+    };
 }

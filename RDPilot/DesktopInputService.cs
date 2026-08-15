@@ -475,7 +475,8 @@
                         return "drag_path must contain visible movement.";
                     if (totalLength > diagonal * 8)
                         return "drag_path is longer than the bounded gesture limit.";
-                    if (action.DurationMs is < 100 or > MaxGestureDurationMs)
+                    if (action.DurationMs is int gestureDuration &&
+                        (gestureDuration < 100 || gestureDuration > MaxGestureDurationMs))
                         return $"drag_path duration_ms must be between 100 and {MaxGestureDurationMs}.";
                     if (action.GestureKind is not null &&
                         action.GestureKind.ToLowerInvariant() is not ("draw" or "lasso" or "pan" or "slider" or "game" or "other"))
@@ -488,7 +489,9 @@
                         return "hold_keys requires at least one key.";
                     if (action.Keys.Length > MaxHeldKeys)
                         return $"hold_keys accepts at most {MaxHeldKeys} simultaneous keys.";
-                    if (action.DurationMs is null or < 100 or > MaxKeyHoldDurationMs)
+                    if (action.DurationMs is not int holdDuration ||
+                        holdDuration < 100 ||
+                        holdDuration > MaxKeyHoldDurationMs)
                         return $"hold_keys duration_ms must be between 100 and {MaxKeyHoldDurationMs}.";
                     try
                     {

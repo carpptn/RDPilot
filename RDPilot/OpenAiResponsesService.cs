@@ -277,6 +277,21 @@
                         return true;
                     }
 
+                    if (eventType == "response.web_search_call.searching")
+                    {
+                        var itemId = root.TryGetProperty("item_id", out var itemIdElement) &&
+                                     itemIdElement.ValueKind == JsonValueKind.String
+                            ? itemIdElement.GetString()
+                            : null;
+                        var firstEventForCall = itemId is null || ReportedWebSearchCallIds.Add(itemId);
+                        if (firstEventForCall)
+                        {
+                            RunWebSearchCalls++;
+                            Console.WriteLine("[web] search started");
+                        }
+                        return false;
+                    }
+
                     if (eventType is "response.completed" or "response.incomplete" or "response.failed")
                     {
                         completed = true;
@@ -366,6 +381,58 @@
                     outputDetails.TryGetProperty("reasoning_tokens", out var reasoning) &&
                     reasoning.TryGetInt64(out var reasoningTokens))
                     RunReasoningTokens += reasoningTokens;
+            }
+
+            internal static void RecordWebSearchMetrics(JsonElement root)
+            {
+                if (!root.TryGetProperty("output", out var output) ||
+                    output.ValueKind != JsonValueKind.Array)
+                {
+                    return;
+                }
+
+                foreach (var item in output.EnumerateArray())
+                {
+                    if (!item.TryGetProperty("type", out var typeElement) ||
+                        typeElement.ValueKind != JsonValueKind.String ||
+                        !string.Equals(typeElement.GetString(), "web_search_call", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var itemId = item.TryGetProperty("id", out var idElement) &&
+                                 idElement.ValueKind == JsonValueKind.String
+                        ? idElement.GetString()
+                        : null;
+                    if (itemId is null || ReportedWebSearchCallIds.Add(itemId))
+                        RunWebSearchCalls++;
+
+                    var detail = "completed";
+                    if (item.TryGetProperty("action", out var action) &&
+                        action.ValueKind == JsonValueKind.Object)
+                    {
+                        if (action.TryGetProperty("query", out var query) &&
+                            query.ValueKind == JsonValueKind.String)
+                        {
+                            detail = $"query={query.GetString()}";
+                        }
+                        else if (action.TryGetProperty("queries", out var queries) &&
+                                 queries.ValueKind == JsonValueKind.Array)
+                        {
+                            var queryList = queries.EnumerateArray()
+                                .Where(value => value.ValueKind == JsonValueKind.String)
+                                .Select(value => value.GetString())
+                                .Where(value => !string.IsNullOrWhiteSpace(value));
+                            detail = $"queries={string.Join(" | ", queryList)}";
+                        }
+                        else if (action.TryGetProperty("type", out var actionType) &&
+                                 actionType.ValueKind == JsonValueKind.String)
+                        {
+                            detail = $"action={actionType.GetString()}";
+                        }
+                    }
+                    Console.WriteLine($"[web] {detail}");
+                }
             }
 
             internal static void RecordResponseId(JsonElement root)
@@ -651,6 +718,7 @@
                         var root = doc.RootElement;
                         RecordResponseId(root);
                         RecordUsageMetrics(root);
+                        RecordWebSearchMetrics(root);
                         var completedResponseId = IsCompletedResponse(root)
                             ? responseId ?? TryGetCompletedResponseId(raw)
                             : null;
@@ -742,6 +810,7 @@
                         var root = doc.RootElement;
                         RecordResponseId(root);
                         RecordUsageMetrics(root);
+                        RecordWebSearchMetrics(root);
 
                         if (TryParseResponsePayload<T>(root, out var parsed, out var candidates, out _))
                         {

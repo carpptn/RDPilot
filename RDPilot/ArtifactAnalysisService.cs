@@ -131,6 +131,7 @@
                         {
                             using var responseDoc = JsonDocument.Parse(raw);
                             RecordUsageMetrics(responseDoc.RootElement);
+                            RecordWebSearchMetrics(responseDoc.RootElement);
                         }
                         catch { }
                     }

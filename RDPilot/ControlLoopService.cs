@@ -19,9 +19,11 @@
                 var prevErr = Console.Error;
                 var logPath = Path.Combine(logDir, $"{commandId}.log");
                 using var logFile = new StreamWriter(logPath, append: false, Encoding.UTF8) { AutoFlush = true };
-                using var tee = new TeeTextWriter(prevOut, logFile);
-                Console.SetOut(tee);
-                Console.SetError(tee);
+                var synchronizedLog = TextWriter.Synchronized(logFile);
+                using var outputTee = new TeeTextWriter(prevOut, synchronizedLog);
+                using var errorTee = new TeeTextWriter(prevErr, synchronizedLog);
+                Console.SetOut(outputTee);
+                Console.SetError(errorTee);
         
                 CancellationTokenSource? cancelCts = null;
                 ControlContextChain? controlContextChain = null;
@@ -52,7 +54,8 @@
                     Console.WriteLine("Loop start: one action -> screenshot -> next decision.");
                     Console.WriteLine("Emergency abort: Ctrl+Alt+Q\n");
         
-                    if (AutoHideConsoleDuringRun || MinimizeConsoleDuringRun)
+                    if (!BatchMode &&
+                        (AutoHideConsoleDuringRun || MinimizeConsoleDuringRun))
                         consoleHidden = ConcealConsoleWindow();
         
                     if (AllowHighLevelActions && TryExecuteFastGoal(goal))

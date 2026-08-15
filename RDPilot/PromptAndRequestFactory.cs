@@ -36,6 +36,10 @@
                 sb.AppendLine("Guidelines:");
                 sb.AppendLine("- Prefer the shortest safe path through the real UI.");
                 sb.AppendLine("- Prefer direct evidence over an inferred shortcut: when one large, unambiguous, visible primary button represents the immediate next step, click it directly instead of guessing a keyboard equivalent from nearby labels or remembered hypotheses. A failed reversible action is useful evidence; modest uncertainty is not a reason to keep inspecting or planning.");
+                if (AllowWebSearch)
+                    sb.AppendLine("- Web search is available for current or external facts that are required by the goal and unavailable from the screen, history, or supplied context. Do not search for ordinary UI operation, visible puzzle/game solutions, or facts already established in this task. Reuse prior search results instead of repeating a query.");
+                else
+                    sb.AppendLine("- Web search is disabled; use only the screen, history, supplied context, and visible UI.");
                 if (AllowHighLevelActions)
                 {
                     sb.AppendLine("- High-level local actions are enabled. Use 'open_url'/'launch_app' only when they directly satisfy the next UI step.");
@@ -131,7 +135,9 @@
             internal static string BuildQaSystemRules()
             {
                 var sb = new StringBuilder();
-                sb.AppendLine("You are a screen analyst. Answer strictly based on the screenshot, metadata (SCREEN_SIZE, CURSOR_POS), and the user's question.");
+                sb.AppendLine(AllowWebSearch
+                    ? "You are a screen analyst. Answer from the screenshot and metadata (SCREEN_SIZE, CURSOR_POS). Use web search only when the user's question requires current or external facts unavailable in the visible state."
+                    : "You are a screen analyst. Answer strictly based on the screenshot, metadata (SCREEN_SIZE, CURSOR_POS), and the user's question.");
                 sb.AppendLine("The image may include a white+red rounded rectangle overlay – that's the element with current keyboard focus (FOCUS_UIA). Treat it as a reliable focus indicator.");
                 sb.AppendLine("Return BOTH: a short textual answer and location metadata for the most relevant element. Add a short 'note'.");
                 sb.AppendLine("Always think in SCREEN_SIZE image pixel coordinates (0,0 top-left). If a location makes sense, choose the center of the visible bbox.");
@@ -507,6 +513,7 @@
                 };
                 if (SupportsTemperature(model))
                     req["temperature"] = 0.0;
+                AddWebSearchOptions(req);
                 if (!string.IsNullOrWhiteSpace(previousResponseId))
                     req["previous_response_id"] = previousResponseId;
                 AddControlContextManagement(req, enableContextCompaction);
@@ -629,6 +636,7 @@
                 };
                 if (SupportsTemperature(model))
                     req["temperature"] = 0.0;
+                AddWebSearchOptions(req);
                 if (!string.IsNullOrWhiteSpace(previousResponseId))
                     req["previous_response_id"] = previousResponseId;
                 AddControlContextManagement(req, enableContextCompaction);
@@ -721,6 +729,7 @@
                 };
                 if (SupportsTemperature(model))
                     req["temperature"] = 0.0;
+                AddWebSearchOptions(req);
                 AddReasoningOptions(req, model, EffectiveQaReasoningEffort(), QaMaxOutputTokens, "qa");
         
                 return req;
@@ -779,6 +788,7 @@
                 };
                 if (SupportsTemperature(model))
                     req["temperature"] = 0.0;
+                AddWebSearchOptions(req);
                 AddReasoningOptions(req, model, EffectiveQaReasoningEffort(), QaMaxOutputTokens, "qa");
         
                 return req;
@@ -1021,6 +1031,23 @@
                 requiresTurnReanalysis
                     ? Math.Max(MaxOutputTokens, TurnReanalysisMaxOutputTokens)
                     : MaxOutputTokens;
+
+            internal static void AddWebSearchOptions(Dictionary<string, object> req)
+            {
+                if (!AllowWebSearch)
+                    return;
+
+                req["tools"] = new object[]
+                {
+                    new
+                    {
+                        type = "web_search",
+                        search_context_size = "medium"
+                    }
+                };
+                req["tool_choice"] = "auto";
+                req["max_tool_calls"] = 3;
+            }
         
             internal static void AddReasoningOptions(
                 Dictionary<string, object> req,

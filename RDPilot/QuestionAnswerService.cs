@@ -16,7 +16,7 @@
             }
         
             // === Q&A ===
-            internal static async Task RunAskOnce(string apiKey, string question)
+            internal static async Task<bool> RunAskOnce(string apiKey, string question)
             {
                 var commandId = Guid.NewGuid().ToString("N");
                 var screensDir = EnsureScreensDir();
@@ -27,9 +27,11 @@
                 var prevErr = Console.Error;
                 var logPath = Path.Combine(logDir, $"{commandId}.log");
                 using var logFile = new StreamWriter(logPath, append: false, Encoding.UTF8) { AutoFlush = true };
-                using var tee = new TeeTextWriter(prevOut, logFile);
-                Console.SetOut(tee);
-                Console.SetError(tee);
+                var synchronizedLog = TextWriter.Synchronized(logFile);
+                using var outputTee = new TeeTextWriter(prevOut, synchronizedLog);
+                using var errorTee = new TeeTextWriter(prevErr, synchronizedLog);
+                Console.SetOut(outputTee);
+                Console.SetError(errorTee);
         
                 CancellationTokenSource? cancelCts = null;
                 var consoleHidden = false;
@@ -40,7 +42,9 @@
                     Console.WriteLine($"Question: {question}");
                     cancelCts = StartCancelHotkeyListener();
         
-                    if (AutoHideConsoleDuringRun && IsOwnConsoleForeground())
+                    if (!BatchMode &&
+                        AutoHideConsoleDuringRun &&
+                        IsOwnConsoleForeground())
                         consoleHidden = ConcealConsoleWindow();
         
                     var (dataUrl, savedPath, screenW, screenH, imageW, imageH, _, _, focusUiaRect, focusUiaSummary, focusUiaDataUrl, focusUiaPath, _, _, _) =
@@ -70,7 +74,7 @@
                     if (qa == null)
                     {
                         Console.WriteLine(CancelRequested ? "Aborted (hotkey)." : "No response.");
-                        return;
+                        return false;
                     }
         
                     if (!string.IsNullOrWhiteSpace(qa.AnswerText))
@@ -94,6 +98,7 @@
         
                     if (qa.BBox is not null)
                         Console.WriteLine($"🧰 bbox=({qa.BBox.Left},{qa.BBox.Top})–({qa.BBox.Right},{qa.BBox.Bottom})");
+                    return true;
                 }
                 finally
                 {
