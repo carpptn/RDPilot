@@ -680,7 +680,9 @@ This is an **experimental** project built for exploration and learning. It simul
 
 ## License
 
-Mozilla Public License 2.0 (`MPL-2.0`). See [`LICENSE.txt`](LICENSE.txt).
+RDPilot is licensed under the GNU Affero General Public License v3.0 (`AGPL-3.0-only`). See [`LICENSE.txt`](LICENSE.txt).
+
+For closed-source redistribution, OEM embedding, or a proprietary hosted offering, contact the repository owner about separate commercial licensing.
 
 If you improve this code, I’ll be happy to accept the changes in a PR :)
 
