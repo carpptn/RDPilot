@@ -680,7 +680,7 @@ This is an **experimental** project built for exploration and learning. It simul
 
 ## License
 
-MIT.
+Mozilla Public License 2.0 (`MPL-2.0`). See [`LICENSE.txt`](LICENSE.txt).
 
 If you improve this code, I’ll be happy to accept the changes in a PR :)
 
