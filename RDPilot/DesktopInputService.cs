@@ -1257,6 +1257,20 @@
             {
                 if (keys is null || keys.Length == 0)
                     throw new InvalidOperationException("Missing keys");
+
+                if (ShouldMinimizeOwnConsoleByHandle(
+                        keys,
+                        IsOwnConsoleForeground()))
+                {
+                    if (!MinimizeConsoleWindow())
+                    {
+                        throw new InvalidOperationException(
+                            "Could not minimize the RDPilot console by its window handle.");
+                    }
+                    Console.WriteLine(
+                        "[window] minimized the RDPilot console by handle instead of emitting Win+Down.");
+                    return;
+                }
         
                 // Recognized modifiers in chords
                 var modifiers = new HashSet<string>(
@@ -1297,6 +1311,33 @@
                         PressKey(item);
                     }
                 }
+            }
+
+            internal static bool ShouldMinimizeOwnConsoleByHandle(
+                string[] keys,
+                bool ownConsoleForeground)
+            {
+                if (!ownConsoleForeground || keys is null || keys.Length == 0)
+                    return false;
+
+                var parts = keys.Length == 1
+                    ? keys[0].Split(
+                        '+',
+                        StringSplitOptions.RemoveEmptyEntries |
+                        StringSplitOptions.TrimEntries)
+                    : keys;
+                if (parts.Length != 2)
+                    return false;
+
+                var modifier = parts[0].Trim();
+                var mainKey = parts[1].Trim();
+                return modifier is not null &&
+                       (modifier.Equals("win", StringComparison.OrdinalIgnoreCase) ||
+                        modifier.Equals("super", StringComparison.OrdinalIgnoreCase) ||
+                        modifier.Equals("meta", StringComparison.OrdinalIgnoreCase) ||
+                        modifier.Equals("cmd", StringComparison.OrdinalIgnoreCase)) &&
+                       (mainKey.Equals("down", StringComparison.OrdinalIgnoreCase) ||
+                        mainKey.Equals("arrowdown", StringComparison.OrdinalIgnoreCase));
             }
         
             internal static bool TrySendVirtualKeySequence(string[] keys)

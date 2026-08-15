@@ -469,7 +469,22 @@
                         screenRegion.Height /
                         (float)Math.Max(1, screenBounds.Height));
                     using var source = DecodeDataUrlBitmap(fullScreenDataUrl);
-                    using var crop = CropNormalizedRegion(source, normalizedRegion);
+                    using var overviewCrop = CropNormalizedRegion(
+                        source,
+                        normalizedRegion);
+                    using var nativeCrop = CaptureNativeScreenRegion(screenRegion);
+                    var crop = nativeCrop is not null &&
+                               AreTurnRegionCapturesConsistent(
+                                   overviewCrop,
+                                   nativeCrop)
+                        ? nativeCrop
+                        : overviewCrop;
+                    if (nativeCrop is not null &&
+                        ReferenceEquals(crop, overviewCrop))
+                    {
+                        Console.WriteLine(
+                            "[turn-memory] native interaction-region capture changed after the primary screenshot; using the coherent overview crop for this turn.");
+                    }
                     imagePath = LogScreens
                         ? ScreenLogPath(saveDir, $"{commandId}_{step}_turn_region")
                         : null;
@@ -486,6 +501,73 @@
                     imagePath = null;
                     return false;
                 }
+            }
+
+            static Bitmap? CaptureNativeScreenRegion(Rectangle screenRegion)
+            {
+                try
+                {
+                    var crop = new Bitmap(
+                        screenRegion.Width,
+                        screenRegion.Height,
+                        PixelFormat.Format24bppRgb);
+                    using var graphics = Graphics.FromImage(crop);
+                    graphics.CopyFromScreen(
+                        screenRegion.Left,
+                        screenRegion.Top,
+                        0,
+                        0,
+                        screenRegion.Size,
+                        CopyPixelOperation.SourceCopy);
+                    return crop;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            internal static bool AreTurnRegionCapturesConsistent(
+                Bitmap earlier,
+                Bitmap later)
+            {
+                if (earlier.Width <= 0 || earlier.Height <= 0 ||
+                    later.Width <= 0 || later.Height <= 0)
+                {
+                    return false;
+                }
+
+                using var normalizedLater = new Bitmap(
+                    earlier.Width,
+                    earlier.Height,
+                    PixelFormat.Format24bppRgb);
+                using (var graphics = Graphics.FromImage(normalizedLater))
+                {
+                    graphics.InterpolationMode =
+                        System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                    graphics.DrawImage(
+                        later,
+                        new Rectangle(0, 0, earlier.Width, earlier.Height));
+                }
+
+                var stepX = Math.Max(1, earlier.Width / 96);
+                var stepY = Math.Max(1, earlier.Height / 96);
+                long difference = 0;
+                long samples = 0;
+                for (var y = 0; y < earlier.Height; y += stepY)
+                for (var x = 0; x < earlier.Width; x += stepX)
+                {
+                    var before = earlier.GetPixel(x, y);
+                    var after = normalizedLater.GetPixel(x, y);
+                    difference += Math.Abs(before.R - after.R) +
+                                  Math.Abs(before.G - after.G) +
+                                  Math.Abs(before.B - after.B);
+                    samples++;
+                }
+
+                var normalizedDifference = difference /
+                    (double)Math.Max(1, samples * 3 * 255);
+                return normalizedDifference <= 0.08;
             }
 
             internal static TurnChangeImagePair? BuildTurnChangeImagePair(

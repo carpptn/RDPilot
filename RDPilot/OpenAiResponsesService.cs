@@ -1055,6 +1055,7 @@
                 if (candidates.Count <= 1 ||
                     observedTurnBatchLimit <= 0 ||
                     candidates[0].PlannedInputs is not { Length: >= 2 } plannedInputs ||
+                    HasImmediateDirectionalReversal(plannedInputs) ||
                     (candidates[0].PlanConfidence ?? candidates[0].Confidence ?? 0) <
                     ControlLoopService.TurnBasedTransitionTracker.MinimumStructuredPlanConfidence ||
                     !TryBindObservedTurnActionToPlannedInput(
@@ -1096,6 +1097,33 @@
                 }
 
                 return result.ToArray();
+            }
+
+            internal static bool HasImmediateDirectionalReversal(
+                IReadOnlyList<string> inputs)
+            {
+                string? previous = null;
+                foreach (var input in inputs)
+                {
+                    if (!TryNormalizeDirectionalLabel(input, out var current))
+                    {
+                        previous = null;
+                        continue;
+                    }
+
+                    if (previous is not null &&
+                        (previous == "ArrowLeft" && current == "ArrowRight" ||
+                         previous == "ArrowRight" && current == "ArrowLeft" ||
+                         previous == "ArrowUp" && current == "ArrowDown" ||
+                         previous == "ArrowDown" && current == "ArrowUp"))
+                    {
+                        return true;
+                    }
+
+                    previous = current;
+                }
+
+                return false;
             }
 
             static bool TryReconcileObservedDirectionalClick(
@@ -1301,7 +1329,32 @@
                     return false;
                 }
 
-                return TryNormalizeDirectionalLabel(action.Note, out label);
+                return TryNormalizeUnambiguousDirectionalLabel(action.Note, out label);
+            }
+
+            internal static bool TryNormalizeUnambiguousDirectionalLabel(
+                string? value,
+                out string label)
+            {
+                var text = value ?? "";
+                var matches = new List<string>(4);
+                if (Regex.IsMatch(text, @"\b(arrowright|right(?:ward|wards)?|w prawo|praw\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                    matches.Add("ArrowRight");
+                if (Regex.IsMatch(text, @"\b(arrowleft|left(?:ward|wards)?|w lewo|lew\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                    matches.Add("ArrowLeft");
+                if (Regex.IsMatch(text, @"\b(arrowup|up(?:ward|wards)?|w gór\w*|gór\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                    matches.Add("ArrowUp");
+                if (Regex.IsMatch(text, @"\b(arrowdown|down(?:ward|wards)?|w dół|dol\w*|dół)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                    matches.Add("ArrowDown");
+
+                if (matches.Count == 1)
+                {
+                    label = matches[0];
+                    return true;
+                }
+
+                label = "";
+                return false;
             }
 
             internal static bool TryNormalizeDirectionalLabel(
@@ -1309,13 +1362,13 @@
                 out string label)
             {
                 var text = value ?? "";
-                if (Regex.IsMatch(text, @"\b(arrowright|right|w prawo|praw\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                if (Regex.IsMatch(text, @"\b(arrowright|right(?:ward|wards)?|w prawo|praw\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
                     label = "ArrowRight";
-                else if (Regex.IsMatch(text, @"\b(arrowleft|left|w lewo|lew\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                else if (Regex.IsMatch(text, @"\b(arrowleft|left(?:ward|wards)?|w lewo|lew\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
                     label = "ArrowLeft";
-                else if (Regex.IsMatch(text, @"\b(arrowup|up|w gór\w*|gór\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                else if (Regex.IsMatch(text, @"\b(arrowup|up(?:ward|wards)?|w gór\w*|gór\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
                     label = "ArrowUp";
-                else if (Regex.IsMatch(text, @"\b(arrowdown|down|w dół|dol\w*|dół)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                else if (Regex.IsMatch(text, @"\b(arrowdown|down(?:ward|wards)?|w dół|dol\w*|dół)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
                     label = "ArrowDown";
                 else
                 {

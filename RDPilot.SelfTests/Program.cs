@@ -523,6 +523,13 @@ static void TestObservationActionGuard()
     Assert(guard.TryGetBlockReason(boardCrop, 2, out var duplicateReason) &&
            duplicateReason.Contains("already inspected", StringComparison.Ordinal),
         "repeated inspection of the same region was not blocked");
+    Assert(guard.TryGetBlockReason(
+               controlsCrop,
+               2,
+               singleInspectionBeforeInteraction: true,
+               out var nestedTurnCropReason) &&
+           nestedTurnCropReason.Contains("already supplied", StringComparison.Ordinal),
+        "a second nested crop was allowed in the same turn-based state");
     Assert(!guard.TryGetBlockReason(controlsCrop, 2, out _), "second distinct inspection was blocked");
     guard.RecordExecuted(controlsCrop);
     Assert(guard.TryGetBlockReason(thirdCrop, 2, out var budgetReason) &&
@@ -596,7 +603,8 @@ static void TestControlActionBatchSchema()
         "legacy single-action instruction still disables batching");
     Assert(rules.Contains("short_term_plan", StringComparison.Ordinal) &&
            rules.Contains("planned_inputs", StringComparison.Ordinal) &&
-           rules.Contains("aggressive batching is the default", StringComparison.Ordinal),
+           rules.Contains("aggressive batching is the default", StringComparison.Ordinal) &&
+           rules.Contains("count the route cell by cell", StringComparison.Ordinal),
         "control prompt does not connect a conditional plan with bounded execution");
 
     var temporalRequest = RDPilotApplication.PromptAndRequestFactory.BuildRequestBody(
@@ -632,6 +640,7 @@ static void TestControlActionBatchSchema()
     var temporalRequestJson = System.Text.Json.JsonSerializer.Serialize(temporalRequest);
     Assert(temporalRequestJson.Contains("PREVIOUS_TURN_STATE_IMAGE", StringComparison.Ordinal) &&
            temporalRequestJson.Contains("TURN_REFERENCE_IMAGE", StringComparison.Ordinal) &&
+           temporalRequestJson.Contains("current visual epoch only", StringComparison.Ordinal) &&
            temporalRequestJson.Contains("CURRENT_FOCUS_IMAGE", StringComparison.Ordinal) &&
            temporalRequestJson.Contains("SALIENT_CHANGE_REGION_1_BEFORE", StringComparison.Ordinal) &&
            temporalRequestJson.Contains("SALIENT_CHANGE_REGION_1_AFTER", StringComparison.Ordinal),
@@ -885,6 +894,21 @@ static void TestHoldKeysValidation()
         },
         null);
     Assert(!systemKey.IsValid, "unsafe system key was accepted for holding");
+
+    Assert(RDPilotApplication.DesktopInputService.ShouldMinimizeOwnConsoleByHandle(
+            ["win+down"],
+            ownConsoleForeground: true) &&
+           RDPilotApplication.DesktopInputService.ShouldMinimizeOwnConsoleByHandle(
+            ["win", "ArrowDown"],
+            ownConsoleForeground: true),
+        "Win+Down aimed at RDPilot's own console was not routed through its window handle");
+    Assert(!RDPilotApplication.DesktopInputService.ShouldMinimizeOwnConsoleByHandle(
+            ["win+down"],
+            ownConsoleForeground: false) &&
+           !RDPilotApplication.DesktopInputService.ShouldMinimizeOwnConsoleByHandle(
+            ["win+left"],
+            ownConsoleForeground: true),
+        "the own-console safeguard blocked a legitimate system window shortcut");
 }
 
 static void TestActionPolicyResolution()
@@ -1085,6 +1109,30 @@ static void TestTurnBasedLocalTransitions()
             },
             regionRequired: true),
         "an explicitly auxiliary crop became the required primary region");
+    var nestedBoardCrop = new ActionDto
+    {
+        Type = "request_crop",
+        Note = "Powiększam centralne rozgałęzienie planszy."
+    };
+    Assert(RDPilotApplication.ControlLoopService.CanReplaceTurnBasedInteractionRegion(
+            hasExistingRegion: true,
+            existingRegionIsAutomatic: true,
+            automaticRegionWasRefined: false,
+            nestedBoardCrop,
+            regionRequired: false) &&
+           !RDPilotApplication.ControlLoopService.CanReplaceTurnBasedInteractionRegion(
+               hasExistingRegion: true,
+               existingRegionIsAutomatic: true,
+               automaticRegionWasRefined: true,
+               nestedBoardCrop,
+               regionRequired: false) &&
+           !RDPilotApplication.ControlLoopService.CanReplaceTurnBasedInteractionRegion(
+               hasExistingRegion: true,
+               existingRegionIsAutomatic: false,
+               automaticRegionWasRefined: false,
+               nestedBoardCrop,
+               regionRequired: false),
+        "an inspection crop could replace an already established/refined primary board region");
     var region = new Rectangle(10, 10, 80, 80);
     ResolvedActionSnapshot Snapshot(string key) =>
         RDPilotApplication.ControlLoopService.AttachTurnBasedObservationRegion(
@@ -1142,6 +1190,43 @@ static void TestTurnBasedLocalTransitions()
             new ActionDto { Type = "keys", Keys = ["ArrowLeft", "ArrowUp"] },
             out var sequenceLength) && sequenceLength == 2,
         "ordered directional key sequence was not recognized");
+    Assert(RDPilotApplication.ControlLoopService.CanExpandTurnKeyActionFromPlan(
+            new ActionDto { Type = "keys", Keys = ["ArrowLeft"] },
+            queuedFollowUpCount: 0) &&
+           !RDPilotApplication.ControlLoopService.CanExpandTurnKeyActionFromPlan(
+            new ActionDto { Type = "keys", Keys = ["ArrowLeft"] },
+            queuedFollowUpCount: 13),
+        "the first key of an already queued route could be expanded into a duplicate full route");
+    Assert(RDPilotApplication.OpenAiResponsesService.TryNormalizeDirectionalLabel(
+            "Continue upward through the corridor.",
+            out var upwardLabel) &&
+           upwardLabel == "ArrowUp" &&
+           RDPilotApplication.OpenAiResponsesService.TryNormalizeDirectionalLabel(
+            "Test the downward branch.",
+            out var downwardLabel) &&
+           downwardLabel == "ArrowDown" &&
+           RDPilotApplication.OpenAiResponsesService.TryNormalizeDirectionalLabel(
+            "Move leftwards, then inspect.",
+            out var leftwardLabel) &&
+           leftwardLabel == "ArrowLeft" &&
+           RDPilotApplication.OpenAiResponsesService.TryNormalizeDirectionalLabel(
+            "Proceed rightward.",
+            out var rightwardLabel) &&
+           rightwardLabel == "ArrowRight",
+        "natural English directional notes were not normalized to authoritative turn inputs");
+    Assert(RDPilotApplication.OpenAiResponsesService.TryNormalizeUnambiguousDirectionalLabel(
+               "Po zablokowanym lewo testuję ruch w górę.",
+               out _) == false &&
+           RDPilotApplication.OpenAiResponsesService.TryNormalizeUnambiguousDirectionalLabel(
+               "Testuję ruch w górę.",
+               out var unambiguousUp) &&
+           unambiguousUp == "ArrowUp",
+        "a note mentioning a previous direction overrode the direction being executed");
+    Assert(RDPilotApplication.OpenAiResponsesService.HasImmediateDirectionalReversal(
+               ["ArrowUp", "ArrowLeft", "ArrowRight", "ArrowDown"]) &&
+           !RDPilotApplication.OpenAiResponsesService.HasImmediateDirectionalReversal(
+               ["ArrowUp", "ArrowUp", "ArrowLeft", "ArrowLeft"]),
+        "an incoherent route with an immediate reversal was accepted for batching");
     Assert(!RDPilotApplication.ControlLoopService.RequiresPrimaryTurnBasedRegion(
             new ActionDto { Type = "click", XPx = 50, YPx = 50 }),
         "an unambiguous visible control click was blocked before the primary region existed");
@@ -1262,6 +1347,57 @@ static void TestTurnBasedLocalTransitions()
                StringComparison.Ordinal),
         "a transient key animation overrode the unchanged settled turn state");
 
+    var auxiliaryOnlyTracker =
+        new RDPilotApplication.ControlLoopService.TurnBasedTransitionTracker();
+    var auxiliaryOnlyBefore = Frame(56, 42, 70);
+    var auxiliaryOnlyAfter = Frame(56, 42, 55);
+    auxiliaryOnlyTracker.ObserveState(auxiliaryOnlyBefore, region);
+    var auxiliaryOnlyAssessment = auxiliaryOnlyTracker.RecordBatchStep(
+        auxiliaryOnlyBefore,
+        auxiliaryOnlyAfter,
+        region,
+        "ArrowUp",
+        actionReactionObserved: true);
+    Assert(auxiliaryOnlyAssessment.NoEffect &&
+           !auxiliaryOnlyAssessment.ContinueBatch &&
+           auxiliaryOnlyAssessment.Summary.Contains(
+               "movement_evidence=false",
+               StringComparison.Ordinal) &&
+           auxiliaryOnlyAssessment.Summary.Contains(
+               "auxiliary_only=true",
+               StringComparison.Ordinal),
+        "a small auxiliary HUD change was mistaken for movement of the controlled object");
+
+    var hudCausalTracker =
+        new RDPilotApplication.ControlLoopService.TurnBasedTransitionTracker();
+    var hudStart = Frame(56, 42, 70);
+    var hudOnly = Frame(56, 42, 55);
+    var movedAfterHud = Frame(44, 42, 40);
+    hudCausalTracker.ObserveState(hudStart, region);
+    var blockedByHud = hudCausalTracker.RecordTransition(
+        hudStart,
+        hudOnly,
+        region,
+        Snapshot("ArrowLeft"),
+        TurnAssessment(ActionOutcomeState.Confirmed, VisualChangeState.Changed));
+    var movedAfterBlockedHud = hudCausalTracker.RecordTransition(
+        hudOnly,
+        movedAfterHud,
+        region,
+        Snapshot("ArrowLeft"),
+        TurnAssessment(ActionOutcomeState.Confirmed, VisualChangeState.Changed));
+    var hudCausalSummary = hudCausalTracker.BuildPromptSummary();
+    Assert(blockedByHud &&
+           !movedAfterBlockedHud &&
+           !hudCausalTracker.RequiresReanalysis &&
+           hudCausalSummary.Contains(
+               "S1 --ArrowLeft--> S1 [no_effect]",
+               StringComparison.Ordinal) &&
+           hudCausalSummary.Contains(
+               "S1 --ArrowLeft--> S2 [changed]",
+               StringComparison.Ordinal),
+        "a recurring peripheral HUD decrement advanced the state or created a false causal event");
+
     var tinyRegion = new Rectangle(0, 0, 64, 64);
     ScreenObservationFrame TinyFrame(int blockX)
     {
@@ -1333,6 +1469,10 @@ static void TestTurnBasedLocalTransitions()
         "ArrowUp");
     Assert(!corridorBatchStep.KnownTransition && corridorBatchStep.ContinueBatch,
         "a learned directional pattern stopped at every new ordinary state");
+    Assert(corridorTracker.BuildPromptSummary().Contains(
+            "S4 --ArrowUp--> S5 [changed]",
+            StringComparison.Ordinal),
+        "successive small moves oscillated between similar historical state ids");
     var corridorBlockedStep = corridorTracker.RecordBatchStep(
         corridorState5,
         corridorState5,
@@ -1477,6 +1617,29 @@ static void TestTurnBasedLocalTransitions()
                ]),
         "the runtime did not expand a short proposal across a visible predictable turn");
 
+    var twentyStepRoute =
+        new RDPilotApplication.ControlLoopService.ShortTermPlanTracker();
+    var twentyInputs = Enumerable.Repeat("ArrowRight", 20).ToArray();
+    twentyStepRoute.Update(new ActionDto
+    {
+        ShortTermPlan = "Follow the long visible straight corridor.",
+        PlanStatus = "active",
+        PlannedInputs = twentyInputs,
+        PlanWaypoint = "the far end of the corridor",
+        PlanStateId = "S1",
+        PlanConfidence = 0.95
+    }, "S1");
+    Assert(twentyStepRoute.BuildPromptSummary().Contains(
+               "CURRENT_PLAN_INDEX: 0/20",
+               StringComparison.Ordinal) &&
+           twentyStepRoute.TryExpandDirectionalSequence(
+               ["ArrowRight"],
+               "S1",
+               32,
+               out var expandedTwentyStepRoute) &&
+           expandedTwentyStepRoute.Length == 20,
+        "the application silently truncated a valid structured route after twelve inputs");
+
     var extendedRoute = new RDPilotApplication.ControlLoopService.ShortTermPlanTracker();
     var extendedTracker = new RDPilotApplication.ControlLoopService.TurnBasedTransitionTracker(
         extendedRoute);
@@ -1561,7 +1724,8 @@ static void TestTurnBasedLocalTransitions()
     tracker.UpdateWorkingMemory(new ActionDto
     {
         WorldStateSummary = "A movable block is navigating a bounded board.",
-        MechanicsHypothesis = "Special board elements may change persistent world state."
+        MechanicsHypothesis = "Special board elements may change persistent world state.",
+        SalientChangeObservation = "Touching the white marker changed a distant reference glyph."
     });
     summary = tracker.BuildPromptSummary();
     Assert(summary.Contains("TURN_WORLD_STATE_MEMORY", StringComparison.Ordinal) &&
@@ -1570,7 +1734,8 @@ static void TestTurnBasedLocalTransitions()
     tracker.UpdateWorkingMemory(new ActionDto
     {
         WorldStateSummary = "A movable block is navigating a bounded board.",
-        MechanicsHypothesis = "The visible marker may instead be the controlled object."
+        MechanicsHypothesis = "The visible marker may instead be the controlled object.",
+        SalientChangeObservation = "Entering the blue terminal changed the level."
     });
     summary = tracker.BuildPromptSummary();
     Assert(summary.Contains("TURN_PRIOR_MECHANICS_HYPOTHESES", StringComparison.Ordinal) &&
@@ -1579,8 +1744,57 @@ static void TestTurnBasedLocalTransitions()
     tracker.BeginExternalStateEpoch();
     summary = tracker.BuildPromptSummary();
     Assert(!summary.Contains("TURN_MECHANICS_HYPOTHESIS", StringComparison.Ordinal) &&
-           !summary.Contains("TURN_PRIOR_MECHANICS_HYPOTHESES", StringComparison.Ordinal),
-        "an external state boundary retained stale hypothesis memory");
+           !summary.Contains("TURN_PRIOR_MECHANICS_HYPOTHESES", StringComparison.Ordinal) &&
+           summary.Contains("TURN_TRANSIENT_CONTEXT_WARNING", StringComparison.Ordinal) &&
+           summary.Contains("TURN_PRIOR_EPOCH_OBSERVED_EVIDENCE", StringComparison.Ordinal) &&
+           !summary.Contains("TURN_PRIOR_EPOCH_HYPOTHESES", StringComparison.Ordinal) &&
+           !summary.Contains("Special board elements", StringComparison.Ordinal) &&
+           !summary.Contains("visible marker", StringComparison.Ordinal) &&
+           !summary.Contains("white marker changed", StringComparison.Ordinal) &&
+           summary.Contains("blue terminal changed", StringComparison.Ordinal),
+        "an external state boundary retained stale topology/hypotheses or discarded the latest causal fact");
+    tracker.UpdateWorkingMemory(new ActionDto
+    {
+        WorldStateSummary = "The stable next board is now visible."
+    });
+    Assert(!tracker.BuildPromptSummary().Contains(
+            "TURN_TRANSIENT_CONTEXT_WARNING",
+            StringComparison.Ordinal),
+        "the transient-context warning survived a committed stable-state update");
+
+    using var referenceCrop = new Bitmap(48, 36);
+    using (var graphics = Graphics.FromImage(referenceCrop))
+        graphics.Clear(Color.FromArgb(40, 80, 120));
+    using var matchingNativeCrop = new Bitmap(96, 72);
+    using (var graphics = Graphics.FromImage(matchingNativeCrop))
+        graphics.Clear(Color.FromArgb(40, 80, 120));
+    using var changedNativeCrop = new Bitmap(96, 72);
+    using (var graphics = Graphics.FromImage(changedNativeCrop))
+        graphics.Clear(Color.FromArgb(220, 30, 20));
+    Assert(RDPilotApplication.ScreenshotService.AreTurnRegionCapturesConsistent(
+               referenceCrop,
+               matchingNativeCrop) &&
+           !RDPilotApplication.ScreenshotService.AreTurnRegionCapturesConsistent(
+               referenceCrop,
+               changedNativeCrop),
+        "native board crops were not checked against the primary screenshot before use");
+    Assert(RDPilotApplication.ControlLoopService.TurnBasedTransitionTracker
+               .IsBoundedAttemptResetEvidence(
+                   returnedToAttemptOrigin: true,
+                   directionalInputs: 50,
+                   broadChange: true,
+                   distantChange: true,
+                   novelRegionCount: 3,
+                   auxiliaryRegionCount: 1) &&
+           !RDPilotApplication.ControlLoopService.TurnBasedTransitionTracker
+               .IsBoundedAttemptResetEvidence(
+                   returnedToAttemptOrigin: true,
+                   directionalInputs: 20,
+                   broadChange: true,
+                   distantChange: false,
+                   novelRegionCount: 1,
+                   auxiliaryRegionCount: 2),
+        "a closed route was confused with broad bounded-attempt reset evidence");
 
     ScreenObservationFrame WithRemoteChange(
         ScreenObservationFrame source,
@@ -1650,9 +1864,30 @@ static void TestTurnBasedLocalTransitions()
            auxiliarySummary.Contains("predictable_regions=", StringComparison.Ordinal),
         "a recurring action-correlated auxiliary change kept forcing reanalysis");
 
-    var novelWorldState = WithRemoteChange(Frame(20, 42, 42), 70, 18);
+    var auxiliaryReturn = Frame(44, 42, 42);
     auxiliaryTracker.RecordTransition(
         auxiliaryState3,
+        auxiliaryReturn,
+        region,
+        Snapshot("ArrowRight"),
+        TurnAssessment(ActionOutcomeState.Confirmed, VisualChangeState.Changed));
+    auxiliarySummary = auxiliaryTracker.BuildPromptSummary();
+    Assert(auxiliarySummary.Contains(
+               "S3 --ArrowRight--> S2 [changed] [returned_to_known_state]",
+               StringComparison.Ordinal) &&
+           auxiliarySummary.Contains("TURN_STATE_RETURN", StringComparison.Ordinal) &&
+           auxiliarySummary.Contains("TURN_AUXILIARY_SIGNAL", StringComparison.Ordinal) &&
+           auxiliarySummary.Contains(
+               "TURN_NAVIGATION_POSE: state=S2; relative=(-1,0)",
+               StringComparison.Ordinal) &&
+           auxiliarySummary.Contains(
+               "(-2,0) S3: ArrowRight->(-1,0) S2",
+               StringComparison.Ordinal),
+        "a changed peripheral indicator prevented recognition of a return to the same logical board state");
+
+    var novelWorldState = WithRemoteChange(Frame(20, 42, 42), 70, 18);
+    auxiliaryTracker.RecordTransition(
+        auxiliaryReturn,
         novelWorldState,
         region,
         Snapshot("ArrowLeft"),

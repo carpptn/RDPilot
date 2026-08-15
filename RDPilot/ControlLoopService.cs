@@ -174,7 +174,8 @@
                         previousRejectedAction = null;
                     }
 
-                    void BeginExternalStateEpoch()
+                    void BeginExternalStateEpoch(
+                        ObservationAssessment? boundaryObservation = null)
                     {
                         loopStateGraph = new LoopStateGraph { RunId = commandId };
                         recoveryEpisode = null;
@@ -187,7 +188,7 @@
                         ambiguousObservationSteps = 0;
                         consecutiveActionFailures = 0;
                         lastSig = null;
-                        lastObservation = null;
+                        lastObservation = boundaryObservation;
                         lastDelta = double.NaN;
                         lastGlobalDelta = double.NaN;
                         lastActiveWindowDelta = double.NaN;
@@ -195,9 +196,14 @@
                         spatialActionCooldowns.Clear();
                         textInputNoChangeAttempts = 0;
                         textInputCooldownUntilStep = 0;
+                        previousTurnFocusDataUrl = null;
+                        previousTurnFocusPath = null;
+                        turnReferenceFocusDataUrl = null;
+                        turnReferenceFocusPath = null;
+                        activeTurnChangeImages = [];
                         turnBasedTransitions.BeginExternalStateEpoch();
                         Console.WriteLine(
-                            "[loop] external state boundary started a fresh loop-detection epoch; prior recovery evidence and unverified hypotheses were cleared.");
+                            "[loop] external state boundary started a fresh visual and loop-detection epoch; local topology and temporal images were cleared while prior task-mechanics evidence was retained.");
                     }
         
                     for (int step = 1;
@@ -232,9 +238,10 @@
                                 observationSession.EffectiveProfile,
                                 "turn_based_interaction",
                                 StringComparison.Ordinal)
-                            ? turnBasedInteractionRegionIsAutomatic
-                                ? null
-                                : turnBasedInteractionRect
+                            ? !turnBasedInteractionRegionIsAutomatic ||
+                              turnBasedAutomaticRegionRefined
+                                ? turnBasedInteractionRect
+                                : null
                             : null;
                         var requestedFocusRect = nextFocusRect ?? persistentTurnBasedRect;
                         var includeObservationDetail =
@@ -363,18 +370,32 @@
                                     !prevAction.Action.TurnSequenceObserved &&
                                     IsStateChangingInteractionAction(prevAction.Action))
                                 {
-                                    turnBasedTransitions.RecordTransition(
-                                        prevObservationFrame,
-                                        observationFrame,
-                                        turnRegion,
-                                        prevAction,
-                                        lastObservation);
+                                    if (turnBasedTransitions.RecordTransition(
+                                            prevObservationFrame,
+                                            observationFrame,
+                                            turnRegion,
+                                            prevAction,
+                                            lastObservation))
+                                    {
+                                        lastObservation = lastObservation with
+                                        {
+                                            ActionOutcome = ActionOutcomeState.NoEffect,
+                                            GoalProgress = GoalProgressState.NoProgress
+                                        };
+                                    }
                                 }
                                 else
                                 {
-                                    turnBasedTransitions.ObserveState(
+                                    var passiveBaseline =
+                                        turnBasedTransitions.PrepareActionBaseline(
                                         observationFrame,
                                         turnRegion);
+                                    if (passiveBaseline.ExternalStateChange)
+                                    {
+                                        Console.WriteLine(
+                                            $"[turn] passive observation crossed an external state boundary; {passiveBaseline.Summary}");
+                                        BeginExternalStateEpoch(lastObservation);
+                                    }
                                 }
                             }
                             if (lastObservation.ActionOutcome == ActionOutcomeState.NoEffect)
@@ -810,11 +831,19 @@
                             metaSb.AppendLine("AMBIGUOUS_ACTION_OUTCOME: Visual activity was observed, but it could not be attributed confidently to the previous action. Reassess the state and expected effect; do not blindly repeat the same input.");
                         if (observationActionGuard.RequiresInteraction(MaxConsecutiveInspectionActions))
                             metaSb.AppendLine("INTERACTION_REQUIRED: The inspection budget is exhausted. request_crop and point are mechanically blocked until RDPilot executes a state-changing interaction. Use visible controls or one safe, reversible input and then observe its effect; use aim only when precise pointer targeting is required.");
+                        else if (string.Equals(
+                                     observationSession.EffectiveProfile,
+                                     "turn_based_interaction",
+                                     StringComparison.Ordinal) &&
+                                 observationActionGuard.ConsecutiveInspectionActions >= 1)
+                            metaSb.AppendLine("TURN_INSPECTION_COMPLETE: a detailed crop has already been supplied for the current state. Another nested request_crop is blocked until a state-changing input is attempted.");
                         if (string.Equals(observationSession.EffectiveProfile, "turn_based_interaction", StringComparison.Ordinal))
                         {
                             metaSb.AppendLine(turnBasedTransitions.CanProposeExecutionBatch
                                 ? $"TURN_BASED_INTERACTION: aggressive execution_ready batching is the default from the first visible route. Commit to the strongest visible control hypothesis and test it with a reversible route; semantic uncertainty is not a reason to inspect HELP, narrate, or delay. Before the first directional input, request_crop is justified only when the board is physically unreadable at the supplied resolution, and HELP/instructions are justified only when no reversible control input is visible. Preliminary single-move calibration is forbidden when at least two reversible moves form a coherent route. Bind the route to TURN_STATE with planned_inputs, plan_waypoint, and plan_confidence. When fixed visible directional controls such as a D-pad exist and keyboard focus has not been confirmed by a successful move, prefer an ordered click sequence over keyboard keys. If a keyboard direction had no effect, preserve the logical route and immediately remap its longest valid prefix to those visible controls; do not test only one button. Send up to {turnBasedTransitions.AdvertisedMaxExecutionBatchLength} observed click/key inputs and include every visible unconditional turn before the next semantic uncertainty; do not pad a route merely to reach the cap. A small or distant recurring auxiliary UI change is recorded but does not stop execution. A blocked input, unavailable observation, broad screen/state transition, or novel local-to-distant causal change interrupts the batch. Do not use hold_keys for discrete movement."
                                 : "TURN_BASED_INTERACTION: The interaction is in an exploration or reanalysis phase. Promptly perform exactly one maximally informative, reversible input, then inspect the resulting frame. Do not spend this turn narrating or solving a full route. Compare labeled temporal images and the reported change regions before acting. Prefer a visible directional/control button or a single Arrow/WASD/Space/F key when the interface suggests those controls. Keep planned_inputs null unless the route is already mechanically established. Do not use hold_keys or batch speculative moves.");
+                            metaSb.AppendLine(
+                                "TURN_GRID_ROUTE_HINT: On a visible grid, board, or maze, trace and count the route cell by cell from the controlled object's current footprint to an evidence-backed semantic waypoint before emitting planned_inputs. Every planned input must correspond to exactly one adjacent traversable cell, every intermediate footprint must remain on the connected visible path, and the number and order of repeated directions must match the counted grid intervals. Do not estimate distance from a qualitative relation such as 'near', 'below-right', or apparent screen proximity, guess through visible barriers, select an unverified marker only because it is salient, or repeat a closed route that returned to a known state. Aggressive batching means executing the longest route that passes this geometric check decisively.");
                             if (turnBasedTransitions.CanProposeExecutionBatch)
                             {
                                 metaSb.AppendLine(
@@ -1030,6 +1059,7 @@
                             break;
                         }
                         consecutiveModelFailures = 0;
+                        var modelResponseAction = action;
         
                         var currentAction = AttachFocusedTextObservationRegion(
                             CaptureResolvedAction(action, lastAimRect),
@@ -1076,7 +1106,9 @@
                                 $"[turn-plan] expanded one observed click into {expandedObservedInputs.Length} route inputs using learned control positions.");
                         }
                         if (isTurnBasedAction &&
-                            action.Type == "keys" &&
+                            CanExpandTurnKeyActionFromPlan(
+                                action,
+                                PendingSafeActions.Count) &&
                             action.Keys is { Length: > 0 } proposedKeys &&
                             TryGetTurnBasedDirectionalSequenceLength(
                                 action,
@@ -1099,13 +1131,6 @@
                                     turnBasedInteractionRect,
                                     currentActionPolicy),
                                 currentActionPolicy);
-                        }
-                        if (string.Equals(
-                                currentActionPolicy,
-                                "turn_based_interaction",
-                                StringComparison.Ordinal))
-                        {
-                            turnBasedTransitions.UpdateWorkingMemory(action);
                         }
                         Console.WriteLine($"[{step}] {currentAction.Description}");
                         if (action.Confidence is double confidence)
@@ -1204,6 +1229,10 @@
                             if (observationActionGuard.TryGetBlockReason(
                                     currentAction,
                                     MaxConsecutiveInspectionActions,
+                                    string.Equals(
+                                        currentActionPolicy,
+                                        "turn_based_interaction",
+                                        StringComparison.Ordinal),
                                     out var observationBlockReason))
                             {
                                 Console.WriteLine($"[guard] observation action blocked: {observationBlockReason}");
@@ -1329,6 +1358,14 @@
                                     observationFrame,
                                     actionBaselineFrame);
                             }
+                            if (string.Equals(
+                                    currentActionPolicy,
+                                    "turn_based_interaction",
+                                    StringComparison.Ordinal))
+                            {
+                                turnBasedTransitions.UpdateWorkingMemory(
+                                    modelResponseAction);
+                            }
         
                             // ——— Mouse policy: global switch ———
                             if (IsMouseAction(action) && !MouseEnabled)
@@ -1366,11 +1403,15 @@
                                         StringComparison.Ordinal))
                                 {
                                     var clamped = ClampRect(rect.Value);
+                                    var canReplaceTurnRegion =
+                                        CanReplaceTurnBasedInteractionRegion(
+                                            turnBasedInteractionRect is not null,
+                                            turnBasedInteractionRegionIsAutomatic,
+                                            turnBasedAutomaticRegionRefined,
+                                            action,
+                                            regionRequired: false);
                                     if (turnBasedInteractionRect is Rectangle existingTurnRegion &&
-                                        !(turnBasedInteractionRegionIsAutomatic &&
-                                          ShouldEstablishTurnBasedInteractionRegion(
-                                              action,
-                                              regionRequired: false)))
+                                        !canReplaceTurnRegion)
                                     {
                                         var inspectionKind = IsOverlappingTurnInspection(
                                                 existingTurnRegion,
@@ -1380,9 +1421,7 @@
                                         Console.WriteLine(
                                             $"[turn] transient {inspectionKind} inspection crop=({clamped.Left},{clamped.Top})–({clamped.Right},{clamped.Bottom}); preserving primary interaction region, transitions, and visual memory.");
                                     }
-                                    else if (ShouldEstablishTurnBasedInteractionRegion(
-                                                 action,
-                                                 regionRequired: false))
+                                    else if (canReplaceTurnRegion)
                                     {
                                         turnBasedInteractionRect = clamped;
                                         turnBasedInteractionRegionIsAutomatic = false;
@@ -1820,7 +1859,7 @@
                 catch (Exception ex)
                 {
                     Console.WriteLine(
-                        $"Control run failed unexpectedly: {ex.Message}");
+                        $"Control run failed unexpectedly: {ex}");
                     runResult = new ControlRunResult(
                         ControlRunOutcome.Failed,
                         currentStep,
@@ -2126,6 +2165,13 @@
                     ? new TurnNoEffectPolicy(false, false)
                     : new TurnNoEffectPolicy(true, false);
 
+            internal static bool CanExpandTurnKeyActionFromPlan(
+                ActionDto action,
+                int queuedFollowUpCount) =>
+                queuedFollowUpCount == 0 &&
+                action.Type == "keys" &&
+                action.Keys is { Length: > 0 };
+
             internal static bool TryTakeQueuedObservedTurnActions(
                 ResolvedActionSnapshot firstAction,
                 Rectangle region,
@@ -2144,12 +2190,15 @@
                 }
 
                 var queued = PendingSafeActions.ToArray();
-                var accepted = new List<ResolvedActionSnapshot>(queued.Length + 1)
+                var maximumActions = Math.Min(
+                    TurnBasedMaxBatchInputs,
+                    plannedInputs.Length);
+                var accepted = new List<ResolvedActionSnapshot>(maximumActions)
                 {
                     firstAction with { ObservationRegion = ClampRect(region) }
                 };
                 for (var index = 0;
-                     index < queued.Length && index + 1 < plannedInputs.Length;
+                     index < queued.Length && accepted.Count < maximumActions;
                      index++)
                 {
                     var candidate = queued[index];
@@ -2347,6 +2396,17 @@
                 internal bool TryGetBlockReason(
                     ResolvedActionSnapshot action,
                     int maxConsecutiveInspectionActions,
+                    out string reason) =>
+                    TryGetBlockReason(
+                        action,
+                        maxConsecutiveInspectionActions,
+                        singleInspectionBeforeInteraction: false,
+                        out reason);
+
+                internal bool TryGetBlockReason(
+                    ResolvedActionSnapshot action,
+                    int maxConsecutiveInspectionActions,
+                    bool singleInspectionBeforeInteraction,
                     out string reason)
                 {
                     reason = "";
@@ -2362,6 +2422,13 @@
                         if (inspectionSignatures.Contains(signature))
                         {
                             reason = "the requested inspection revisits an area already inspected since the last interaction; choose a state-changing action";
+                            return true;
+                        }
+
+                        if (singleInspectionBeforeInteraction &&
+                            ConsecutiveInspectionActions >= 1)
+                        {
+                            reason = "a detailed turn-based inspection was already supplied; perform a state-changing input before requesting another nested crop";
                             return true;
                         }
 
@@ -2473,6 +2540,12 @@
 
                     var nextReason = NormalizePlanText(action.PlanRevisionReason, 200);
                     var nextInputs = NormalizePlannedInputs(action.PlannedInputs);
+                    if (OpenAiResponsesService.HasImmediateDirectionalReversal(nextInputs))
+                    {
+                        Invalidate(
+                            "the proposed route contains an immediate opposing-direction reversal and is not a coherent path to one waypoint");
+                        return;
+                    }
                     var nextWaypoint = NormalizePlanText(action.PlanWaypoint, 160);
                     var revised = requestedStatus == "revised";
                     var hasStructuredIdentity =
@@ -2679,7 +2752,7 @@
                         .Select(NormalizePlannedInput)
                         .Where(value => value is not null)
                         .Select(value => value!)
-                        .Take(12)
+                        .Take(TurnBasedMaxBatchInputs)
                         .ToArray() ?? [];
 
                 static string? NormalizePlannedInput(string? value) =>
@@ -2706,9 +2779,12 @@
 
             internal sealed class TurnBasedTransitionTracker
             {
-                const int StateFingerprintSide = 64;
+                const int StateFingerprintSide = 96;
                 const double StateMatchMeanThreshold = 0.004;
                 const double StateMatchChangedRatioThreshold = 0.0025;
+                const double ActionStateMatchMeanThreshold = 0.0005;
+                const double ActionStateMatchChangedRatioThreshold = 0.00075;
+                const double MinimumDirectionalMotionChangedRatio = 0.00085;
                 const double ExternalChangeMeanThreshold = 0.006;
                 const double ExternalChangeRatioThreshold = 0.006;
                 const double CoherentExternalChangeMeanThreshold = 0.003;
@@ -2717,6 +2793,7 @@
                 const int ChangeTileSide = 4;
                 const int RecurrentRegionLimit = 18;
                 const int RecurrentRegionMaxAge = 12;
+                const int StatePrototypeLimit = 512;
 
                 sealed class StatePrototype(string id, byte[] fingerprint)
                 {
@@ -2728,7 +2805,16 @@
                     string From,
                     string Action,
                     string To,
-                    string Result);
+                    string Result,
+                    bool ReturnedToKnownState);
+
+                readonly record struct NavigationEdge(
+                    string FromState,
+                    Point From,
+                    string Action,
+                    string ToState,
+                    Point To,
+                    bool Blocked);
 
                 readonly record struct ChangeRegion(
                     int Left,
@@ -2743,6 +2829,8 @@
                     IReadOnlyList<ChangeRegion> Regions,
                     IReadOnlyList<ChangeRegion> NovelRegions,
                     int PredictableRegionCount,
+                    int AuxiliaryRegionCount,
+                    bool IsAuxiliaryOnly,
                     bool HasDistantRegions,
                     bool HasCausalDistantChange,
                     bool IsBroad)
@@ -2754,11 +2842,16 @@
 
                 sealed class RecurrentChangeRegion(
                     ChangeRegion bounds,
-                    int lastSeenTransition)
+                    int lastSeenTransition,
+                    string? actionLabel)
                 {
                     internal ChangeRegion Bounds { get; set; } = bounds;
                     internal int Hits { get; set; } = 1;
                     internal int LastSeenTransition { get; set; } = lastSeenTransition;
+                    internal HashSet<string> ActionLabels { get; } =
+                        string.IsNullOrWhiteSpace(actionLabel)
+                            ? []
+                            : [actionLabel];
                 }
 
                 sealed class CausalEventEvidence(
@@ -2795,10 +2888,16 @@
                 readonly Queue<double> ordinaryTransitionRatios = new();
                 readonly List<RecurrentChangeRegion> recurrentActionRegions = [];
                 readonly Queue<string> mechanicsHypothesisHistory = new();
+                readonly Queue<string> salientObservationHistory = new();
+                readonly Queue<string> priorEpochMechanicsEvidence = new();
                 readonly Dictionary<string, ActionDto> directionalClickTemplates = new(
                     StringComparer.Ordinal);
+                readonly Dictionary<string, Point> navigationStatePositions = new(
+                    StringComparer.Ordinal);
+                readonly Queue<NavigationEdge> navigationEdges = new();
                 readonly ShortTermPlanTracker shortTermPlan;
                 bool[] volatilePixels = [];
+                bool[] auxiliaryStatePixels = [];
                 string? currentStateId;
                 string? lastChangeSummary;
                 string? worldStateSummary;
@@ -2810,7 +2909,15 @@
                 bool actionBaselineCalibrated;
                 byte[]? batchOriginFingerprint;
                 int consecutiveBatchNoEffect;
+                int auxiliarySignalTransitions;
+                int consecutiveAuxiliarySignalTransitions;
+                bool auxiliarySignalChangedDuringKnownStateReturn;
+                string? attemptOriginStateId;
+                int attemptDirectionalInputs;
+                int? inferredAttemptInputLimit;
+                int boundedAttemptResetCount;
                 CausalEventEvidence? causalEvent;
+                bool previousProposalWasDiscardedAsStale;
 
                 internal bool RequiresReanalysis { get; private set; }
                 internal IReadOnlyList<RectangleF> SalientChangeRegions =>
@@ -2872,7 +2979,13 @@
                     ordinaryTransitionRatios.Clear();
                     recurrentActionRegions.Clear();
                     mechanicsHypothesisHistory.Clear();
+                    salientObservationHistory.Clear();
+                    priorEpochMechanicsEvidence.Clear();
+                    directionalClickTemplates.Clear();
+                    navigationStatePositions.Clear();
+                    navigationEdges.Clear();
                     volatilePixels = [];
+                    auxiliaryStatePixels = [];
                     currentStateId = null;
                     lastChangeSummary = null;
                     worldStateSummary = null;
@@ -2886,11 +2999,20 @@
                     actionBaselineCalibrated = false;
                     batchOriginFingerprint = null;
                     consecutiveBatchNoEffect = 0;
+                    auxiliarySignalTransitions = 0;
+                    consecutiveAuxiliarySignalTransitions = 0;
+                    auxiliarySignalChangedDuringKnownStateReturn = false;
+                    attemptOriginStateId = null;
+                    attemptDirectionalInputs = 0;
+                    inferredAttemptInputLimit = null;
+                    boundedAttemptResetCount = 0;
                     causalEvent = null;
+                    previousProposalWasDiscardedAsStale = false;
                 }
 
                 internal void BeginExternalStateEpoch()
                 {
+                    PreservePriorEpochMechanicsEvidence();
                     var current = states.FirstOrDefault(state =>
                         string.Equals(state.Id, currentStateId, StringComparison.Ordinal));
                     states.Clear();
@@ -2901,7 +3023,9 @@
                     ordinaryTransitionRatios.Clear();
                     recurrentActionRegions.Clear();
                     mechanicsHypothesisHistory.Clear();
-                    directionalClickTemplates.Clear();
+                    salientObservationHistory.Clear();
+                    navigationStatePositions.Clear();
+                    navigationEdges.Clear();
                     volatilePixels = [];
                     worldStateSummary = null;
                     mechanicsHypothesis = null;
@@ -2909,7 +3033,17 @@
                     actionBaselineCalibrated = true;
                     batchOriginFingerprint = null;
                     consecutiveBatchNoEffect = 0;
+                    auxiliarySignalTransitions = 0;
+                    consecutiveAuxiliarySignalTransitions = 0;
+                    auxiliarySignalChangedDuringKnownStateReturn = false;
+                    attemptOriginStateId = currentStateId;
+                    attemptDirectionalInputs = 0;
+                    inferredAttemptInputLimit = null;
+                    boundedAttemptResetCount = 0;
                     causalEvent = null;
+                    previousProposalWasDiscardedAsStale = true;
+                    if (currentStateId is not null)
+                        navigationStatePositions[currentStateId] = Point.Empty;
                 }
 
                 internal void BeginBatch(
@@ -2932,6 +3066,8 @@
                     if (currentStateId is null)
                     {
                         currentStateId = ResolveState(fingerprint, out _);
+                        navigationStatePositions[currentStateId] = Point.Empty;
+                        attemptOriginStateId = currentStateId;
                         actionBaselineCalibrated = false;
                         Console.WriteLine(
                             $"[turn] primary state established; immediate structured batching is available up to {AdvertisedMaxExecutionBatchLength} inputs.");
@@ -2943,6 +3079,9 @@
                     if (current is null)
                     {
                         currentStateId = ResolveState(fingerprint, out _);
+                        navigationStatePositions.TryAdd(
+                            currentStateId,
+                            Point.Empty);
                         return;
                     }
 
@@ -3027,7 +3166,7 @@
                     return new BaselineAssessment(true, lastChangeSummary);
                 }
 
-                internal void RecordTransition(
+                internal bool RecordTransition(
                     ScreenObservationFrame before,
                     ScreenObservationFrame after,
                     Rectangle region,
@@ -3038,7 +3177,7 @@
                     var beforeFingerprint = ExtractRegionFingerprint(before, region);
                     var afterFingerprint = ExtractRegionFingerprint(after, region);
                     if (beforeFingerprint.Length == 0 || afterFingerprint.Length == 0)
-                        return;
+                        return false;
 
                     EnsureVolatileMask(beforeFingerprint.Length);
                     var beforeState = currentStateId ?? ResolveState(beforeFingerprint, out _);
@@ -3050,13 +3189,21 @@
                     var changeAnalysis = AnalyzeChanges(
                         beforeFingerprint,
                         afterFingerprint,
-                        learnActionPatterns: true);
+                        learnActionPatterns: true,
+                        actionLabel: actionLabel);
                     var persistentVisualChange =
                         HasPersistentVisualChange(changeAnalysis);
+                    var movementEvidence = HasDirectionalMotionEvidence(
+                        actionLabel,
+                        changeAnalysis);
                     string afterState;
                     string result;
+                    var returnedToKnownState = false;
                     if (assessment.ActionOutcome == ActionOutcomeState.NoEffect ||
-                        !persistentVisualChange)
+                        !persistentVisualChange ||
+                        IsCanonicalDirectionalInput(actionLabel) &&
+                        !movementEvidence &&
+                        !changeAnalysis.RequiresImmediateReanalysis)
                     {
                         afterState = beforeState;
                         result = "no_effect";
@@ -3066,9 +3213,14 @@
                     {
                         afterState = ResolveActionState(
                             afterFingerprint,
-                            beforeState,
                             actionLabel,
-                            changeAnalysis);
+                            changeAnalysis,
+                            out var isNewState);
+                        returnedToKnownState = !isNewState &&
+                                               !string.Equals(
+                                                   beforeState,
+                                                   afterState,
+                                                   StringComparison.Ordinal);
                         result = "changed";
                     }
                     else
@@ -3094,10 +3246,23 @@
                         beforeState,
                         actionLabel,
                         afterState,
-                        result));
+                        result,
+                        returnedToKnownState));
                     while (transitions.Count > TransitionMemoryLimit)
                         transitions.Dequeue();
-                    RecordChangeEvidence(beforeState, actionLabel, afterState, changeAnalysis);
+                    RecordNavigationTransition(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        result);
+                    RecordChangeEvidence(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        changeAnalysis,
+                        result,
+                        movementEvidence,
+                        returnedToKnownState);
                     if (result == "no_effect")
                         shortTermPlan.Invalidate("a planned directional input had no effect");
                     else if (changeAnalysis.RequiresImmediateReanalysis)
@@ -3115,6 +3280,7 @@
                         Console.WriteLine(
                             "[turn] phase exploration -> execution_ready; bounded ordered key sequences are now allowed.");
                     }
+                    return result == "no_effect";
                 }
 
                 internal BatchStepAssessment RecordBatchStep(
@@ -3256,8 +3422,15 @@
                     var analysis = AnalyzeChanges(
                         beforeFingerprint,
                         afterFingerprint,
-                        learnActionPatterns: true);
-                    var result = HasPersistentVisualChange(analysis)
+                        learnActionPatterns: true,
+                        actionLabel: actionLabel);
+                    var movementEvidence = HasDirectionalMotionEvidence(
+                        actionLabel,
+                        analysis);
+                    var result = HasPersistentVisualChange(analysis) &&
+                                 (!IsCanonicalDirectionalInput(actionLabel) ||
+                                  movementEvidence ||
+                                  analysis.RequiresImmediateReanalysis)
                         ? "changed"
                         : "no_effect";
                     var cumulativeDifference = batchOriginFingerprint is { Length: > 0 } origin &&
@@ -3270,13 +3443,23 @@
                     else
                         consecutiveBatchNoEffect = 0;
                     var confirmedNoEffect = result == "no_effect";
+                    var returnedToKnownState = false;
+                    var isNewState = false;
                     var afterState = result == "no_effect"
                         ? beforeState
                         : ResolveActionState(
                             afterFingerprint,
-                            beforeState,
                             actionLabel,
-                            analysis);
+                            analysis,
+                            out isNewState);
+                    if (result != "no_effect")
+                    {
+                        returnedToKnownState = !isNewState &&
+                                               !string.Equals(
+                                                   beforeState,
+                                                   afterState,
+                                                   StringComparison.Ordinal);
+                    }
                     var knownTransition = transitions.Any(transition =>
                         string.Equals(transition.From, beforeState, StringComparison.Ordinal) &&
                         string.Equals(transition.Action, actionLabel, StringComparison.Ordinal) &&
@@ -3298,11 +3481,24 @@
                         beforeState,
                         actionLabel,
                         afterState,
-                        result));
+                        result,
+                        returnedToKnownState));
                     while (transitions.Count > TransitionMemoryLimit)
                         transitions.Dequeue();
+                    RecordNavigationTransition(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        result);
 
-                    RecordChangeEvidence(beforeState, actionLabel, afterState, analysis);
+                    RecordChangeEvidence(
+                        beforeState,
+                        actionLabel,
+                        afterState,
+                        analysis,
+                        result,
+                        movementEvidence,
+                        returnedToKnownState);
                     if (confirmedNoEffect)
                         shortTermPlan.Invalidate("a batched planned input had no persistent visual effect");
                     else if (analysis.RequiresImmediateReanalysis)
@@ -3316,7 +3512,7 @@
                             changed: true);
                     }
                     var summary =
-                        $"{beforeState} --{actionLabel}--> {afterState} [{result}]; transient_reaction={actionReactionObserved.ToString().ToLowerInvariant()}; predictable_action_pattern={predictableActionPattern.ToString().ToLowerInvariant()}; plan_backed={planBackedAction.ToString().ToLowerInvariant()}; no_effect_streak={consecutiveBatchNoEffect}; cumulative_change={cumulativeChangeObserved.ToString().ToLowerInvariant()}; cumulative_ratio={cumulativeDifference.ChangedRatio:0.####}; {FormatChangeAnalysis(analysis)}";
+                        $"{beforeState} --{actionLabel}--> {afterState} [{result}]; transient_reaction={actionReactionObserved.ToString().ToLowerInvariant()}; movement_evidence={movementEvidence.ToString().ToLowerInvariant()}; predictable_action_pattern={predictableActionPattern.ToString().ToLowerInvariant()}; plan_backed={planBackedAction.ToString().ToLowerInvariant()}; no_effect_streak={consecutiveBatchNoEffect}; cumulative_change={cumulativeChangeObserved.ToString().ToLowerInvariant()}; cumulative_ratio={cumulativeDifference.ChangedRatio:0.####}; {FormatChangeAnalysis(analysis)}";
                     return new BatchStepAssessment(
                         !analysis.RequiresImmediateReanalysis && !confirmedNoEffect,
                         knownTransition,
@@ -3327,6 +3523,7 @@
 
                 internal void UpdateWorkingMemory(ActionDto action)
                 {
+                    previousProposalWasDiscardedAsStale = false;
                     var nextWorldState = NormalizeWorkingMemory(action.WorldStateSummary);
                     var nextHypothesis = NormalizeWorkingMemory(action.MechanicsHypothesis);
                     var nextSalientObservation = NormalizeWorkingMemory(
@@ -3363,11 +3560,47 @@
                             StringComparison.Ordinal))
                     {
                         salientChangeObservation = nextSalientObservation;
+                        if (salientChangeObservation is not null &&
+                            !string.Equals(
+                                salientObservationHistory.LastOrDefault(),
+                                salientChangeObservation,
+                                StringComparison.Ordinal))
+                        {
+                            salientObservationHistory.Enqueue(
+                                salientChangeObservation);
+                            while (salientObservationHistory.Count > 6)
+                                salientObservationHistory.Dequeue();
+                        }
                         Console.WriteLine(
                             salientChangeObservation is null
                                 ? "[turn-memory] salient_change_observation cleared."
                                 : $"[turn-memory] salient_change={salientChangeObservation}");
                     }
+                }
+
+                void PreservePriorEpochMechanicsEvidence()
+                {
+                    AddPriorEpochEvidence(salientChangeObservation);
+                    if (causalEvent is not null)
+                    {
+                        AddPriorEpochEvidence(
+                            $"application-observed transition: {causalEvent.BaselineState} --{causalEvent.TriggerAction}--> {causalEvent.ChangedState}; {causalEvent.ChangeSummary}");
+                    }
+                }
+
+                void AddPriorEpochEvidence(string? evidence)
+                {
+                    if (string.IsNullOrWhiteSpace(evidence) ||
+                        priorEpochMechanicsEvidence.Contains(
+                            evidence,
+                            StringComparer.Ordinal))
+                    {
+                        return;
+                    }
+
+                    priorEpochMechanicsEvidence.Enqueue(evidence);
+                    while (priorEpochMechanicsEvidence.Count > 8)
+                        priorEpochMechanicsEvidence.Dequeue();
                 }
 
                 internal bool HasRequiredSalientObservation(ActionDto action) =>
@@ -3396,7 +3629,10 @@
                         foreach (var transition in transitions)
                         {
                             builder.AppendLine(
-                                $"- {transition.From} --{transition.Action}--> {transition.To} [{transition.Result}]");
+                                $"- {transition.From} --{transition.Action}--> {transition.To} [{transition.Result}]" +
+                                (transition.ReturnedToKnownState
+                                    ? " [returned_to_known_state]"
+                                    : ""));
                         }
                         builder.AppendLine("TURN_TOPOLOGY (latest observed directed edges):");
                         foreach (var stateGroup in transitions
@@ -3418,12 +3654,44 @@
                                 $"- {stateGroup.Key}: {string.Join("; ", edges)}");
                         }
                     }
+                    AppendNavigationSummary(builder);
                     if (!string.IsNullOrWhiteSpace(lastChangeSummary))
                         builder.AppendLine($"TURN_VISUAL_CHANGE_REGIONS (percent of interaction region): {lastChangeSummary}");
                     if (recurrentActionRegions.Any(pattern => pattern.Hits >= 2))
                     {
                         builder.AppendLine(
                             "TURN_AUXILIARY_CHANGES: recurring action-correlated visual regions were observed and are treated as predictable evidence, not by themselves as a new world-rule event.");
+                    }
+                    if (auxiliarySignalTransitions > 0)
+                    {
+                        builder.AppendLine(
+                            $"TURN_AUXILIARY_SIGNAL: a recurring peripheral visual indicator changed alongside {auxiliarySignalTransitions} observed input transition(s), including {consecutiveAuxiliarySignalTransitions} consecutively. It is excluded from board-state identity but retained as potentially task-relevant evidence; infer its meaning from its trajectory without assuming a semantic label.");
+                        if (auxiliarySignalChangedDuringKnownStateReturn)
+                        {
+                            builder.AppendLine(
+                                "TURN_AUXILIARY_RETURN_EVIDENCE: the peripheral indicator changed during a transition that returned the board to a previously observed state. Consider whether the indicator constrains the action sequence; its meaning is not predetermined.");
+                        }
+                        if (consecutiveAuxiliarySignalTransitions >= 6 &&
+                            inferredAttemptInputLimit is null)
+                        {
+                            builder.AppendLine(
+                                "TURN_POSSIBLE_ACTION_COST: the same peripheral indicator has changed across many consecutive inputs. Until disproved, treat interaction inputs as potentially consuming a bounded attempt resource: prefer the shortest visible or confirmed route, avoid redundant calibration and known closed paths, and use the per-input barrier only for genuine uncertainty.");
+                        }
+                    }
+                    if (inferredAttemptInputLimit is int attemptLimit)
+                    {
+                        var estimatedRemaining = Math.Max(
+                            0,
+                            attemptLimit - attemptDirectionalInputs);
+                        builder.AppendLine(
+                            $"TURN_ATTEMPT_BUDGET_EVIDENCE: {boundedAttemptResetCount} broad return(s) to the attempt origin occurred after repeated directional inputs while distant world elements reappeared and the recurring peripheral indicator changed. This is evidence of a bounded attempt or action resource, not evidence that the last semantic target itself caused the reset.");
+                        builder.AppendLine(
+                            $"TURN_ATTEMPT_BUDGET_STATUS: observed_limit_about={attemptLimit}; current_attempt_inputs={attemptDirectionalInputs}; estimated_remaining_at_most={estimatedRemaining}. Complete the remaining goal through the shortest confirmed topology; do not reorder already confirmed semantic prerequisites or repeat exploratory detours merely because a reset occurred.");
+                    }
+                    if (transitions.LastOrDefault().ReturnedToKnownState)
+                    {
+                        builder.AppendLine(
+                            "TURN_STATE_RETURN: the latest movement returned to a previously observed board state after auxiliary UI differences were excluded. Treat this recurrence as authoritative topology and do not repeat the same closed route unless it serves a deliberate new test.");
                     }
                     if (LatestTransitionHadNoEffect)
                     {
@@ -3434,6 +3702,18 @@
                         $"TURN_REANALYSIS_REQUIRED: {RequiresReanalysis.ToString().ToLowerInvariant()}");
                     if (!string.IsNullOrWhiteSpace(worldStateSummary))
                         builder.AppendLine($"TURN_WORLD_STATE_MEMORY: {worldStateSummary}");
+                    if (previousProposalWasDiscardedAsStale)
+                    {
+                        builder.AppendLine(
+                            "TURN_TRANSIENT_CONTEXT_WARNING: the immediately preceding model proposal was based on a screen that changed before execution. Its world description, mechanics hypothesis, plan, and proposed action are stale and must not be treated as evidence for the current state.");
+                    }
+                    if (priorEpochMechanicsEvidence.Count > 0)
+                    {
+                        builder.AppendLine(
+                            "TURN_PRIOR_EPOCH_OBSERVED_EVIDENCE (before/after facts retained across a board or level boundary; when compatible with the current visuals, this evidence has priority over speculative semantic labels):");
+                        foreach (var evidence in priorEpochMechanicsEvidence)
+                            builder.AppendLine($"- {evidence}");
+                    }
                     var priorHypotheses = mechanicsHypothesisHistory
                         .Where(item => !string.Equals(
                             item,
@@ -3482,11 +3762,50 @@
                     builder.AppendLine(
                         $"TURN_PHASE: {(CanProposeExecutionBatch ? "execution_ready" : "exploration")}");
                     builder.Append(CanProposeExecutionBatch
-                        ? $"TURN_EXECUTION_HINT: Aggressive batching is available immediately and is the default. Commit to the strongest visible control hypothesis even when the mechanics are not yet certain; the per-input barrier is the experiment. If the current screen is a gateway, overlay, dialog, title screen, or other obvious pre-task state with a prominent primary affordance, activate that visible affordance directly before trying keyboard aliases, inspecting similarly labelled auxiliary controls, or reasoning about the hidden task. Do not inspect HELP or request another crop merely to reduce semantic uncertainty before the first reversible route. Derive a concrete route to one visible semantic waypoint and put its longest reversible prefix in planned_inputs. In visual navigation or shape-matching tasks, compare the controllable object's current geometry, colors, and orientation with any apparent terminal. If they visibly mismatch and a distinct reachable marker or transformation affordance exists, prefer that informative intermediate waypoint and re-observe its causal effect instead of forcing the incompatible terminal. When a fixed D-pad or equivalent controls are visible and keyboard focus is unconfirmed, prefer an observed click sequence for the entire route. After a keyboard no_effect, remap the route to visible controls in one batch instead of issuing a single test click. Send up to {AdvertisedMaxExecutionBatchLength} inputs and include all visible unconditional turns before the next semantic uncertainty; do not pad a route merely to reach the cap. Confidence of {MinimumStructuredPlanConfidence:0.00} is sufficient. Small recurring auxiliary interface changes do not stop the route; a confirmed no_effect, unavailable observation, broad screen/state transition, or novel local-to-distant causal change interrupts it."
+                        ? $"TURN_EXECUTION_HINT: Aggressive batching is available immediately and is the default. Commit to the strongest visible control hypothesis even when the mechanics are not yet certain; the per-input barrier is the experiment. If compatible prior-epoch observed evidence identifies an affordance sequence or causal role, prefer testing or reusing that observed role before inventing a new meaning from color, position, or visual novelty alone. If the current screen is a gateway, overlay, dialog, title screen, or other obvious pre-task state with a prominent primary affordance, activate that visible affordance directly before trying keyboard aliases, inspecting similarly labelled auxiliary controls, or reasoning about the hidden task. Do not inspect HELP or request another crop merely to reduce semantic uncertainty before the first reversible route. Derive a concrete route to one visible semantic waypoint and put its longest reversible prefix in planned_inputs. In visual navigation or shape-matching tasks, compare the controllable object's current geometry, colors, and orientation with any apparent terminal. If they visibly mismatch and a distinct reachable marker or transformation affordance exists, prefer that informative intermediate waypoint and re-observe its causal effect instead of forcing the incompatible terminal. When a fixed D-pad or equivalent controls are visible and keyboard focus is unconfirmed, prefer an observed click sequence for the entire route. After a keyboard no_effect, remap the route to visible controls in one batch instead of issuing a single test click. Send up to {AdvertisedMaxExecutionBatchLength} inputs and include all visible unconditional turns before the next semantic uncertainty; do not pad a route merely to reach the cap. Confidence of {MinimumStructuredPlanConfidence:0.00} is sufficient. Small recurring auxiliary interface changes do not stop the route; a confirmed no_effect, unavailable observation, broad screen/state transition, or novel local-to-distant causal change interrupts it."
                         : RequiresReanalysis
                             ? "TURN_REANALYSIS_HINT: A non-routine or external state change occurred. Compare every explicitly labeled temporal image actually attached to this request and the reported changed regions. Revise the causal hypothesis, then choose exactly one evidence-driven input."
                             : "TURN_EXPLORATION_HINT: Treat this ledger as observed evidence. Promptly choose one maximally informative, goal-relevant, untried safe discrete input; avoid repeating an input recorded as no_effect. Do not narrate or solve a full route in this turn: observe this one input first. Compare the movable object with visible goal/target patterns before exhaustively testing every control, and keep planned_inputs null unless the route is already mechanically established.");
                     return builder.ToString();
+                }
+
+                void AppendNavigationSummary(StringBuilder builder)
+                {
+                    if (navigationEdges.Count == 0 ||
+                        currentStateId is null ||
+                        !navigationStatePositions.TryGetValue(
+                            currentStateId,
+                            out var currentPosition))
+                    {
+                        return;
+                    }
+
+                    builder.AppendLine(
+                        $"TURN_NAVIGATION_POSE: state={currentStateId}; relative=({currentPosition.X},{currentPosition.Y}); origin=(0,0) is the first board state in this epoch; X increases right and Y increases down.");
+                    builder.AppendLine(
+                        "TURN_NAVIGATION_GRAPH (observed movement only; blocked means the input did not change board position):");
+                    var latestEdges = navigationEdges
+                        .GroupBy(edge => (
+                            edge.From.X,
+                            edge.From.Y,
+                            edge.Action))
+                        .Select(group => group.Last())
+                        .GroupBy(edge => (
+                            edge.From.X,
+                            edge.From.Y,
+                            edge.FromState))
+                        .OrderBy(group => group.Key.Y)
+                        .ThenBy(group => group.Key.X);
+                    foreach (var group in latestEdges)
+                    {
+                        var descriptions = group
+                            .OrderBy(edge => edge.Action, StringComparer.Ordinal)
+                            .Select(edge => edge.Blocked
+                                ? $"{edge.Action}=blocked"
+                                : $"{edge.Action}->({edge.To.X},{edge.To.Y}) {edge.ToState}");
+                        builder.AppendLine(
+                            $"- ({group.Key.X},{group.Key.Y}) {group.Key.FromState}: {string.Join("; ", descriptions)}");
+                    }
                 }
 
                 bool LatestTransitionHadNoEffect =>
@@ -3556,35 +3875,40 @@
 
                 string ResolveActionState(
                     byte[] fingerprint,
-                    string beforeState,
                     string actionLabel,
-                    ChangeAnalysis analysis) =>
-                    ResolveState(
+                    ChangeAnalysis analysis,
+                    out bool isNew)
+                {
+                    if (!IsCanonicalDirectionalInput(actionLabel) ||
+                        !HasPersistentVisualChange(analysis))
+                    {
+                        return ResolveState(fingerprint, out isNew);
+                    }
+
+                    return ResolveState(
                         fingerprint,
-                        out _,
-                        IsCanonicalDirectionalInput(actionLabel) &&
-                        HasPersistentVisualChange(analysis)
-                            ? beforeState
-                            : null);
+                        out isNew,
+                        ActionStateMatchMeanThreshold,
+                        ActionStateMatchChangedRatioThreshold);
+                }
 
                 string ResolveState(
                     byte[] fingerprint,
                     out bool isNew,
-                    string? excludedStateId = null)
+                    double meanThreshold = StateMatchMeanThreshold,
+                    double changedRatioThreshold = StateMatchChangedRatioThreshold)
                 {
                     StatePrototype? best = null;
                     var bestScore = double.MaxValue;
                     foreach (var state in states)
                     {
-                        if (string.Equals(
-                                state.Id,
-                                excludedStateId,
-                                StringComparison.Ordinal))
-                        {
-                            continue;
-                        }
-                        var difference = StateDifference(state.Fingerprint, fingerprint);
-                        if (!IsSameState(difference))
+                        var difference = StateIdentityDifference(
+                            state.Fingerprint,
+                            fingerprint);
+                        if (!IsSameState(
+                                difference,
+                                meanThreshold,
+                                changedRatioThreshold))
                             continue;
                         var score = difference.ChangedRatio * 4 + difference.MeanDelta;
                         if (score < bestScore)
@@ -3602,6 +3926,17 @@
 
                     var id = $"S{nextStateNumber++}";
                     states.Add(new StatePrototype(id, fingerprint));
+                    if (states.Count > StatePrototypeLimit)
+                    {
+                        var removable = states.FirstOrDefault(state =>
+                            !string.Equals(
+                                state.Id,
+                                currentStateId,
+                                StringComparison.Ordinal) &&
+                            !string.Equals(state.Id, id, StringComparison.Ordinal));
+                        if (removable is not null)
+                            states.Remove(removable);
+                    }
                     isNew = true;
                     return id;
                 }
@@ -3610,10 +3945,27 @@
                     string beforeState,
                     string actionLabel,
                     string afterState,
-                    ChangeAnalysis analysis)
+                    ChangeAnalysis analysis,
+                    string result,
+                    bool movementEvidence,
+                    bool returnedToKnownState)
                 {
                     lastChangeSummary =
                         $"{beforeState} --{actionLabel}--> {afterState}; {FormatChangeAnalysis(analysis)}";
+                    RecordAuxiliarySignalEvidence(
+                        analysis,
+                        returnedToKnownState);
+                    RecordAttemptBudgetEvidence(
+                        actionLabel,
+                        afterState,
+                        analysis,
+                        returnedToKnownState);
+                    if (!string.Equals(result, "changed", StringComparison.Ordinal))
+                    {
+                        salientChangeRegions = [];
+                        return;
+                    }
+
                     UpdateCausalEvent(
                         beforeState,
                         actionLabel,
@@ -3636,12 +3988,159 @@
 
                     salientChangeRegions = [];
 
-                    if (analysis.ChangedRatio > StateMatchChangedRatioThreshold)
+                    if (IsCanonicalDirectionalInput(actionLabel) &&
+                        movementEvidence &&
+                        analysis.ChangedRatio >= MinimumDirectionalMotionChangedRatio)
                     {
                         ordinaryTransitionRatios.Enqueue(analysis.ChangedRatio);
                         while (ordinaryTransitionRatios.Count > TransitionMemoryLimit)
                             ordinaryTransitionRatios.Dequeue();
                     }
+                }
+
+                void RecordAuxiliarySignalEvidence(
+                    ChangeAnalysis analysis,
+                    bool returnedToKnownState)
+                {
+                    if (analysis.AuxiliaryRegionCount <= 0)
+                    {
+                        if (analysis.Regions.Count > 0)
+                            consecutiveAuxiliarySignalTransitions = 0;
+                        return;
+                    }
+
+                    auxiliarySignalTransitions++;
+                    consecutiveAuxiliarySignalTransitions++;
+                    if (returnedToKnownState)
+                        auxiliarySignalChangedDuringKnownStateReturn = true;
+                }
+
+                void RecordAttemptBudgetEvidence(
+                    string actionLabel,
+                    string afterState,
+                    ChangeAnalysis analysis,
+                    bool returnedToKnownState)
+                {
+                    if (!IsCanonicalDirectionalInput(actionLabel))
+                        return;
+
+                    attemptDirectionalInputs++;
+                    var returnedToAttemptOrigin =
+                        returnedToKnownState &&
+                        attemptOriginStateId is not null &&
+                        string.Equals(
+                            afterState,
+                            attemptOriginStateId,
+                            StringComparison.Ordinal);
+                    if (!IsBoundedAttemptResetEvidence(
+                            returnedToAttemptOrigin,
+                            attemptDirectionalInputs,
+                            analysis.IsBroad,
+                            analysis.HasDistantRegions,
+                            analysis.NovelRegions.Count,
+                            analysis.AuxiliaryRegionCount))
+                    {
+                        return;
+                    }
+
+                    var observedLimit = attemptDirectionalInputs;
+                    if (inferredAttemptInputLimit is null ||
+                        observedLimit >= inferredAttemptInputLimit.Value * 0.70)
+                    {
+                        inferredAttemptInputLimit = inferredAttemptInputLimit is null
+                            ? observedLimit
+                            : Math.Min(
+                                inferredAttemptInputLimit.Value,
+                                observedLimit);
+                    }
+                    boundedAttemptResetCount++;
+                    attemptDirectionalInputs = 0;
+                    Console.WriteLine(
+                        $"[turn-budget] bounded attempt evidence detected; observed_limit_about={inferredAttemptInputLimit}; resets={boundedAttemptResetCount}.");
+                }
+
+                internal static bool IsBoundedAttemptResetEvidence(
+                    bool returnedToAttemptOrigin,
+                    int directionalInputs,
+                    bool broadChange,
+                    bool distantChange,
+                    int novelRegionCount,
+                    int auxiliaryRegionCount) =>
+                    returnedToAttemptOrigin &&
+                    directionalInputs >= 8 &&
+                    broadChange &&
+                    distantChange &&
+                    novelRegionCount >= 2 &&
+                    auxiliaryRegionCount >= 1;
+
+                void RecordNavigationTransition(
+                    string beforeState,
+                    string actionLabel,
+                    string afterState,
+                    string result)
+                {
+                    if (!TryDirectionalDelta(actionLabel, out var delta))
+                        return;
+
+                    if (!navigationStatePositions.TryGetValue(
+                            beforeState,
+                            out var beforePosition))
+                    {
+                        beforePosition = navigationStatePositions.Count == 0
+                            ? Point.Empty
+                            : navigationStatePositions.TryGetValue(
+                                currentStateId ?? "",
+                                out var currentPosition)
+                                ? currentPosition
+                                : Point.Empty;
+                        navigationStatePositions[beforeState] = beforePosition;
+                    }
+
+                    var blocked = string.Equals(
+                        result,
+                        "no_effect",
+                        StringComparison.Ordinal);
+                    var expectedPosition = blocked
+                        ? beforePosition
+                        : new Point(
+                            beforePosition.X + delta.X,
+                            beforePosition.Y + delta.Y);
+                    if (!blocked &&
+                        navigationStatePositions.TryGetValue(
+                            afterState,
+                            out var knownPosition))
+                    {
+                        expectedPosition = knownPosition;
+                    }
+                    else if (!blocked)
+                    {
+                        navigationStatePositions[afterState] = expectedPosition;
+                    }
+
+                    navigationEdges.Enqueue(new NavigationEdge(
+                        beforeState,
+                        beforePosition,
+                        actionLabel,
+                        afterState,
+                        expectedPosition,
+                        blocked));
+                    while (navigationEdges.Count > 128)
+                        navigationEdges.Dequeue();
+                }
+
+                static bool TryDirectionalDelta(
+                    string actionLabel,
+                    out Point delta)
+                {
+                    delta = actionLabel switch
+                    {
+                        "ArrowUp" or "W" => new Point(0, -1),
+                        "ArrowDown" or "S" => new Point(0, 1),
+                        "ArrowLeft" or "A" => new Point(-1, 0),
+                        "ArrowRight" or "D" => new Point(1, 0),
+                        _ => Point.Empty
+                    };
+                    return delta != Point.Empty;
                 }
 
                 void UpdateCausalEvent(
@@ -3723,7 +4222,8 @@
                 ChangeAnalysis AnalyzeChanges(
                     byte[] earlier,
                     byte[] later,
-                    bool learnActionPatterns)
+                    bool learnActionPatterns,
+                    string? actionLabel = null)
                 {
                     var difference = StateDifference(earlier, later);
                     var tileCount = StateFingerprintSide / ChangeTileSide;
@@ -3748,14 +4248,28 @@
 
                     var regions = ConnectedChangeRegions(activeTiles, tileCount);
                     IReadOnlyList<ChangeRegion> novelRegions = regions;
-                    var predictableRegionCount = 0;
+                    IReadOnlyList<ChangeRegion> predictableRegions = [];
+                    IReadOnlyList<ChangeRegion> auxiliaryRegions = [];
                     if (learnActionPatterns && regions.Count > 0)
                     {
                         actionTransitionNumber++;
-                        var classification = ClassifyAndLearnActionRegions(regions);
+                        var classification = ClassifyAndLearnActionRegions(
+                            regions,
+                            actionLabel);
                         novelRegions = classification.NovelRegions;
-                        predictableRegionCount = classification.PredictableRegionCount;
+                        predictableRegions = classification.PredictableRegions;
+                        auxiliaryRegions = classification.AuxiliaryRegions;
+                        LearnAuxiliaryStateRegions(auxiliaryRegions);
+                        novelRegions = novelRegions
+                            .Where(region => !IsKnownAuxiliaryRegion(region))
+                            .ToArray();
                     }
+                    var isAuxiliaryOnly =
+                        difference.ChangedRatio <= 0.012 &&
+                        regions.Count > 0 &&
+                        regions.All(region =>
+                            IsKnownAuxiliaryRegion(region) ||
+                            IsLikelyPeripheralAuxiliaryRegion(region));
                     var hasDistantRegions = false;
                     for (var novelIndex = 0;
                          novelIndex < novelRegions.Count && !hasDistantRegions;
@@ -3764,9 +4278,17 @@
                     {
                         if (novelRegions[novelIndex].Equals(regions[otherIndex]))
                             continue;
+                        if (IsKnownAuxiliaryRegion(regions[otherIndex]))
+                        {
+                            continue;
+                        }
                         if (RegionCenterDistance(
                                 novelRegions[novelIndex],
-                                regions[otherIndex]) >= 0.30)
+                                regions[otherIndex]) >= 0.30 &&
+                            !AreExpectedDirectionalMotionPair(
+                                actionLabel,
+                                novelRegions[novelIndex],
+                                regions[otherIndex]))
                         {
                             hasDistantRegions = true;
                             break;
@@ -3777,33 +4299,41 @@
                         ? 0.0
                         : ordinaryTransitionRatios.OrderBy(value => value)
                             .ElementAt(ordinaryTransitionRatios.Count / 2);
-                    var broadThreshold = Math.Max(0.025, typicalRatio * 2.5);
+                    var broadThreshold = Math.Max(0.0075, typicalRatio * 2.5);
                     var isBroad = novelRegions.Count > 0 &&
                                   ordinaryTransitionRatios.Count >= 2 &&
                                   difference.ChangedRatio >= broadThreshold;
                     var hasCausalDistantChange =
                         hasDistantRegions &&
                         novelRegions.Count > 0 &&
-                        predictableRegionCount > 0;
+                        predictableRegions.Any(region =>
+                            !IsKnownAuxiliaryRegion(region));
                     return new ChangeAnalysis(
                         difference.MeanDelta,
                         difference.ChangedRatio,
                         regions,
                         novelRegions,
-                        predictableRegionCount,
+                        predictableRegions.Count,
+                        auxiliaryRegions.Count,
+                        isAuxiliaryOnly,
                         hasDistantRegions,
                         hasCausalDistantChange,
                         isBroad);
                 }
 
-                (IReadOnlyList<ChangeRegion> NovelRegions, int PredictableRegionCount)
-                    ClassifyAndLearnActionRegions(IReadOnlyList<ChangeRegion> regions)
+                (IReadOnlyList<ChangeRegion> NovelRegions,
+                    IReadOnlyList<ChangeRegion> PredictableRegions,
+                    IReadOnlyList<ChangeRegion> AuxiliaryRegions)
+                    ClassifyAndLearnActionRegions(
+                        IReadOnlyList<ChangeRegion> regions,
+                        string? actionLabel)
                 {
                     recurrentActionRegions.RemoveAll(pattern =>
                         actionTransitionNumber - pattern.LastSeenTransition >
                         RecurrentRegionMaxAge);
                     var novel = new List<ChangeRegion>();
-                    var predictable = 0;
+                    var predictable = new List<ChangeRegion>();
+                    var auxiliary = new List<ChangeRegion>();
                     var matchedPatterns = new HashSet<RecurrentChangeRegion>();
                     foreach (var region in regions)
                     {
@@ -3820,15 +4350,28 @@
                             novel.Add(region);
                             recurrentActionRegions.Add(new RecurrentChangeRegion(
                                 region,
-                                actionTransitionNumber));
+                                actionTransitionNumber,
+                                actionLabel));
+                            if (IsKnownAuxiliaryRegion(region) ||
+                                IsStrongPeripheralIndicatorCandidate(region))
+                                auxiliary.Add(region);
                             continue;
                         }
 
                         matchedPatterns.Add(match);
-                        predictable++;
+                        predictable.Add(region);
                         match.Hits++;
+                        if (!string.IsNullOrWhiteSpace(actionLabel))
+                            match.ActionLabels.Add(actionLabel);
                         match.Bounds = region;
                         match.LastSeenTransition = actionTransitionNumber;
+                        if (IsKnownAuxiliaryRegion(region) ||
+                            IsStrongPeripheralIndicatorCandidate(region) ||
+                            IsLikelyPeripheralAuxiliaryRegion(region) &&
+                            (match.Hits >= 3 || match.ActionLabels.Count >= 2))
+                        {
+                            auxiliary.Add(region);
+                        }
                     }
 
                     if (recurrentActionRegions.Count > RecurrentRegionLimit)
@@ -3837,7 +4380,7 @@
                             0,
                             recurrentActionRegions.Count - RecurrentRegionLimit);
                     }
-                    return (novel, predictable);
+                    return (novel, predictable, auxiliary);
                 }
 
                 static bool RegionsFollowSamePattern(
@@ -3897,6 +4440,29 @@
                             2));
                 }
 
+                static bool AreExpectedDirectionalMotionPair(
+                    string? actionLabel,
+                    ChangeRegion left,
+                    ChangeRegion right)
+                {
+                    if (actionLabel is null ||
+                        !IsCanonicalDirectionalInput(actionLabel))
+                    {
+                        return false;
+                    }
+
+                    var deltaX = Math.Abs(
+                        (left.Left + left.Right) -
+                        (right.Left + right.Right)) / 2.0;
+                    var deltaY = Math.Abs(
+                        (left.Top + left.Bottom) -
+                        (right.Top + right.Bottom)) / 2.0;
+                    var vertical = actionLabel is "ArrowUp" or "ArrowDown" or "W" or "S";
+                    return vertical
+                        ? deltaY >= ChangeTileSide && deltaY > deltaX * 1.5
+                        : deltaX >= ChangeTileSide && deltaX > deltaY * 1.5;
+                }
+
                 static bool HasSpatiallySeparatedChangeRegions(
                     IReadOnlyList<ChangeRegion> regions)
                 {
@@ -3913,6 +4479,136 @@
                     analysis.Regions.Count > 0 ||
                     analysis.ChangedRatio >= 0.00025 ||
                     analysis.MeanDelta >= 0.00005;
+
+                bool HasDirectionalMotionEvidence(
+                    string actionLabel,
+                    ChangeAnalysis analysis)
+                {
+                    if (!IsCanonicalDirectionalInput(actionLabel))
+                        return true;
+                    if (analysis.IsAuxiliaryOnly)
+                        return false;
+
+                    var vertical = actionLabel is "ArrowUp" or "ArrowDown" or "W" or "S";
+                    foreach (var region in analysis.Regions)
+                    {
+                        var width = Math.Max(1, region.Right - region.Left);
+                        var height = Math.Max(1, region.Bottom - region.Top);
+                        if (vertical &&
+                            height >= ChangeTileSide * 2 &&
+                            height >= width * 1.20 ||
+                            !vertical &&
+                            width >= ChangeTileSide * 2 &&
+                            width >= height * 1.20)
+                        {
+                            return true;
+                        }
+                    }
+
+                    for (var first = 0; first < analysis.Regions.Count; first++)
+                    for (var second = first + 1; second < analysis.Regions.Count; second++)
+                    {
+                        var left = analysis.Regions[first];
+                        var right = analysis.Regions[second];
+                        var deltaX = Math.Abs(
+                            (left.Left + left.Right) -
+                            (right.Left + right.Right)) / 2.0;
+                        var deltaY = Math.Abs(
+                            (left.Top + left.Bottom) -
+                            (right.Top + right.Bottom)) / 2.0;
+                        if (vertical && deltaY >= ChangeTileSide && deltaY > deltaX * 1.5 ||
+                            !vertical && deltaX >= ChangeTileSide && deltaX > deltaY * 1.5)
+                        {
+                            return true;
+                        }
+                    }
+
+                    var typicalRatio = TypicalDirectionalMotionRatio();
+                    var adaptiveThreshold = typicalRatio <= 0
+                        ? MinimumDirectionalMotionChangedRatio
+                        : Math.Max(
+                            MinimumDirectionalMotionChangedRatio,
+                            typicalRatio * 0.35);
+                    return analysis.ChangedRatio >= adaptiveThreshold;
+                }
+
+                double TypicalDirectionalMotionRatio() =>
+                    ordinaryTransitionRatios.Count == 0
+                        ? 0.0
+                        : ordinaryTransitionRatios
+                            .OrderBy(value => value)
+                            .ElementAt(ordinaryTransitionRatios.Count / 2);
+
+                static bool IsLikelyPeripheralAuxiliaryRegion(ChangeRegion region)
+                {
+                    var width = Math.Max(1, region.Right - region.Left);
+                    var height = Math.Max(1, region.Bottom - region.Top);
+                    var outerBand = StateFingerprintSide / 8;
+                    var nearOuterEdge =
+                        region.Bottom <= outerBand ||
+                        region.Top >= StateFingerprintSide - outerBand ||
+                        region.Right <= outerBand ||
+                        region.Left >= StateFingerprintSide - outerBand;
+                    var compact =
+                        width * height <= StateFingerprintSide * StateFingerprintSide * 0.025 &&
+                        Math.Min(width, height) <= StateFingerprintSide / 8;
+                    return nearOuterEdge && compact;
+                }
+
+                static bool IsStrongPeripheralIndicatorCandidate(
+                    ChangeRegion region)
+                {
+                    if (!IsLikelyPeripheralAuxiliaryRegion(region))
+                        return false;
+                    var width = Math.Max(1, region.Right - region.Left);
+                    var height = Math.Max(1, region.Bottom - region.Top);
+                    return Math.Max(width, height) >= Math.Min(width, height) * 1.75;
+                }
+
+                void LearnAuxiliaryStateRegions(
+                    IReadOnlyList<ChangeRegion> regions)
+                {
+                    EnsureAuxiliaryStateMask();
+                    const int dilation = ChangeTileSide;
+                    foreach (var region in regions)
+                    {
+                        var left = Math.Max(0, region.Left - dilation);
+                        var top = Math.Max(0, region.Top - dilation);
+                        var right = Math.Min(
+                            StateFingerprintSide,
+                            region.Right + dilation);
+                        var bottom = Math.Min(
+                            StateFingerprintSide,
+                            region.Bottom + dilation);
+                        for (var y = top; y < bottom; y++)
+                        for (var x = left; x < right; x++)
+                            auxiliaryStatePixels[y * StateFingerprintSide + x] = true;
+                    }
+                }
+
+                bool IsKnownAuxiliaryRegion(ChangeRegion region)
+                {
+                    if (auxiliaryStatePixels.Length !=
+                        StateFingerprintSide * StateFingerprintSide)
+                    {
+                        return false;
+                    }
+
+                    var covered = 0;
+                    var area = 0;
+                    for (var y = Math.Max(0, region.Top);
+                         y < Math.Min(StateFingerprintSide, region.Bottom);
+                         y++)
+                    for (var x = Math.Max(0, region.Left);
+                         x < Math.Min(StateFingerprintSide, region.Right);
+                         x++)
+                    {
+                        area++;
+                        if (auxiliaryStatePixels[y * StateFingerprintSide + x])
+                            covered++;
+                    }
+                    return area > 0 && covered / (double)area >= 0.35;
+                }
 
                 static bool IsPeripheralOnlyChange(
                     IReadOnlyList<ChangeRegion> regions)
@@ -3993,7 +4689,7 @@
                         : string.Join(", ", analysis.Regions.Select(region =>
                             $"[{Percent(region.Left)}..{Percent(region.Right)}% x, {Percent(region.Top)}..{Percent(region.Bottom)}% y]"));
                     return
-                        $"changed_ratio={analysis.ChangedRatio:0.####}; mean_delta={analysis.MeanDelta:0.####}; regions={regions}; novel_regions={analysis.NovelRegions.Count}; predictable_regions={analysis.PredictableRegionCount}; distant={analysis.HasDistantRegions.ToString().ToLowerInvariant()}; causal_distant={analysis.HasCausalDistantChange.ToString().ToLowerInvariant()}; broad={analysis.IsBroad.ToString().ToLowerInvariant()}";
+                        $"changed_ratio={analysis.ChangedRatio:0.####}; mean_delta={analysis.MeanDelta:0.####}; regions={regions}; novel_regions={analysis.NovelRegions.Count}; predictable_regions={analysis.PredictableRegionCount}; auxiliary_regions={analysis.AuxiliaryRegionCount}; auxiliary_only={analysis.IsAuxiliaryOnly.ToString().ToLowerInvariant()}; distant={analysis.HasDistantRegions.ToString().ToLowerInvariant()}; causal_distant={analysis.HasCausalDistantChange.ToString().ToLowerInvariant()}; broad={analysis.IsBroad.ToString().ToLowerInvariant()}";
                 }
 
                 static int Percent(int coordinate) =>
@@ -4010,6 +4706,14 @@
                 {
                     if (volatilePixels.Length != length)
                         volatilePixels = new bool[length];
+                    EnsureAuxiliaryStateMask();
+                }
+
+                void EnsureAuxiliaryStateMask()
+                {
+                    var length = StateFingerprintSide * StateFingerprintSide;
+                    if (auxiliaryStatePixels.Length != length)
+                        auxiliaryStatePixels = new bool[length];
                 }
 
                 void LearnAmbientPixels(byte[] earlier, byte[] later)
@@ -4075,9 +4779,45 @@
                         : (sum / compared, changed / (double)compared);
                 }
 
-                static bool IsSameState((double MeanDelta, double ChangedRatio) difference) =>
-                    difference.MeanDelta <= StateMatchMeanThreshold &&
-                    difference.ChangedRatio <= StateMatchChangedRatioThreshold;
+                (double MeanDelta, double ChangedRatio) StateIdentityDifference(
+                    byte[] left,
+                    byte[] right)
+                {
+                    var count = Math.Min(
+                        volatilePixels.Length,
+                        Math.Min(left.Length, right.Length));
+                    if (count == 0)
+                        return (1, 1);
+
+                    double sum = 0;
+                    var changed = 0;
+                    var compared = 0;
+                    for (var index = 0; index < count; index++)
+                    {
+                        if (volatilePixels[index] ||
+                            index < auxiliaryStatePixels.Length &&
+                            auxiliaryStatePixels[index])
+                        {
+                            continue;
+                        }
+
+                        var difference = Math.Abs(left[index] - right[index]);
+                        sum += difference / 255.0;
+                        if (difference >= 8)
+                            changed++;
+                        compared++;
+                    }
+                    return compared == 0
+                        ? (1, 1)
+                        : (sum / compared, changed / (double)compared);
+                }
+
+                static bool IsSameState(
+                    (double MeanDelta, double ChangedRatio) difference,
+                    double meanThreshold = StateMatchMeanThreshold,
+                    double changedRatioThreshold = StateMatchChangedRatioThreshold) =>
+                    difference.MeanDelta <= meanThreshold &&
+                    difference.ChangedRatio <= changedRatioThreshold;
 
                 static byte[] ExtractRegionFingerprint(
                     ScreenObservationFrame frame,
@@ -4122,7 +4862,7 @@
                     return output;
                 }
 
-                static string TurnActionLabel(ResolvedActionSnapshot snapshot)
+                string TurnActionLabel(ResolvedActionSnapshot snapshot)
                 {
                     var action = snapshot.Action;
                     if (OpenAiResponsesService.TryNormalizeDirectionalLabel(
@@ -4135,12 +4875,17 @@
                         return string.Join(",", action.Keys.Select(CanonicalKeyLabel));
                     if (action.Type is "click" or "double_click" or "click_uia" or "focus_uia")
                     {
+                        if (TryResolveDirectionalClickTemplate(action, out var templateLabel))
+                            return templateLabel;
                         var target = string.IsNullOrWhiteSpace(action.Note)
                             ? snapshot.SemanticTokens
                             : action.Note;
-                        var direction = CanonicalDirectionLabel(target);
-                        if (direction is not null)
+                        if (OpenAiResponsesService.TryNormalizeUnambiguousDirectionalLabel(
+                                target,
+                                out var direction))
+                        {
                             return direction;
+                        }
                         return string.IsNullOrWhiteSpace(target)
                             ? action.Type
                             : $"{action.Type}:{TrimForMeta(target, 48)}";
@@ -4148,21 +4893,89 @@
                     return action.Type;
                 }
 
+                bool TryResolveDirectionalClickTemplate(
+                    ActionDto action,
+                    out string label)
+                {
+                    label = "";
+                    if (action.Type is not ("click" or "double_click") ||
+                        !TryGetActionImagePoint(action, out var point))
+                    {
+                        return false;
+                    }
+
+                    const int maximumDistance = 8;
+                    var nearest = directionalClickTemplates
+                        .Select(entry => new
+                        {
+                            entry.Key,
+                            Point = TryGetActionImagePoint(entry.Value, out var templatePoint)
+                                ? templatePoint
+                                : ((int X, int Y)?)null
+                        })
+                        .Where(entry => entry.Point is not null)
+                        .Select(entry => new
+                        {
+                            entry.Key,
+                            DistanceSquared =
+                                (entry.Point!.Value.X - point.X) *
+                                (entry.Point.Value.X - point.X) +
+                                (entry.Point.Value.Y - point.Y) *
+                                (entry.Point.Value.Y - point.Y)
+                        })
+                        .Where(entry =>
+                            entry.DistanceSquared <= maximumDistance * maximumDistance)
+                        .OrderBy(entry => entry.DistanceSquared)
+                        .Take(2)
+                        .ToArray();
+                    if (nearest.Length == 0 ||
+                        nearest.Length > 1 &&
+                        nearest[0].DistanceSquared == nearest[1].DistanceSquared)
+                    {
+                        return false;
+                    }
+
+                    label = nearest[0].Key;
+                    action.ResolvedTurnInputLabel = label;
+                    return true;
+                }
+
+                static bool TryGetActionImagePoint(
+                    ActionDto action,
+                    out (int X, int Y) point)
+                {
+                    if (action.XPx is int x && action.YPx is int y)
+                    {
+                        point = (x, y);
+                        return true;
+                    }
+
+                    if (action.BBox is
+                        {
+                            Left: int left,
+                            Top: int top,
+                            Right: int right,
+                            Bottom: int bottom
+                        })
+                    {
+                        point = ((left + right) / 2, (top + bottom) / 2);
+                        return true;
+                    }
+
+                    point = default;
+                    return false;
+                }
+
                 static string CanonicalKeyLabel(string key) =>
                     CanonicalDirectionLabel(key) ?? key.Trim();
 
                 static string? CanonicalDirectionLabel(string? value)
                 {
-                    var text = value ?? "";
-                    if (Regex.IsMatch(text, @"\b(arrowright|right|w prawo|praw\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-                        return "ArrowRight";
-                    if (Regex.IsMatch(text, @"\b(arrowleft|left|w lewo|lew\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-                        return "ArrowLeft";
-                    if (Regex.IsMatch(text, @"\b(arrowup|up|w gór\w*|gór\w*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-                        return "ArrowUp";
-                    if (Regex.IsMatch(text, @"\b(arrowdown|down|w dół|dol\w*|dół)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-                        return "ArrowDown";
-                    return null;
+                    return OpenAiResponsesService.TryNormalizeDirectionalLabel(
+                        value,
+                        out var label)
+                        ? label
+                        : null;
                 }
 
                 static bool IsCanonicalDirectionalInput(string label) =>
@@ -5180,6 +5993,16 @@
                 action.Type == "request_crop" &&
                 (IsTurnBasedStateInspection(action) ||
                  regionRequired && !IsTurnBasedAuxiliaryInspection(action));
+
+            internal static bool CanReplaceTurnBasedInteractionRegion(
+                bool hasExistingRegion,
+                bool existingRegionIsAutomatic,
+                bool automaticRegionWasRefined,
+                ActionDto action,
+                bool regionRequired) =>
+                ShouldEstablishTurnBasedInteractionRegion(action, regionRequired) &&
+                (!hasExistingRegion ||
+                 existingRegionIsAutomatic && !automaticRegionWasRefined);
 
             internal static bool IsTurnBasedAuxiliaryInspection(ActionDto action)
             {

@@ -176,6 +176,7 @@ internal static partial class RDPilotApplication
     static ScreenCoordinateMapper CurrentScreenMap = ScreenCoordinateMapper.Create(1, 1, 1, 1);
     static bool ExecuteMultiActionCandidates = true;
     static int MaxQueuedBatchActions = 4;
+    static int TurnBasedMaxBatchInputs = 32;
     static int MaxBatchedGesturePoints = 180;
     static int MaxBatchedGestureDurationMs = 12_000;
     static int MaxConsecutiveInspectionActions = 2;
