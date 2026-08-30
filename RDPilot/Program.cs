@@ -331,8 +331,7 @@ internal static partial class RDPilotApplication
             var promptHistory = PromptHistoryService.Load();
             Console.WriteLine(
                 "Enter a task or question. Use Up/Down for prompt history, '/ask ' for Q&A, and '/exit' to quit.");
-            Console.WriteLine(
-                $"Prompt history: {PromptHistoryService.EffectivePath()} ({promptHistory.Count} entries)\n");
+            Console.WriteLine();
 
             while (true)
             {
