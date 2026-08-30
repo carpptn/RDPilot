@@ -1,0 +1,34 @@
+﻿name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-self-test:
+    name: Build and self-test
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore .\RDPilot.sln
+
+      - name: Build
+        run: dotnet build .\RDPilot.sln -c Release --no-restore
+
+      - name: Run deterministic self-tests
+        run: dotnet run --project .\RDPilot.SelfTests\RDPilot.SelfTests.csproj -c Release --no-build

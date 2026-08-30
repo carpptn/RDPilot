@@ -7,6 +7,7 @@ worked.**
 [![Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE.txt)
+[![CI](https://github.com/carpptn/RDPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/carpptn/RDPilot/actions/workflows/ci.yml)
 
 RDPilot is an experimental C#/.NET application that lets a multimodal AI control
 the visible Windows desktop through screenshots, keyboard, mouse, clipboard, and
@@ -56,9 +57,20 @@ feed verified failures back into the next decision.
 ### Requirements
 
 - Windows 10 or Windows 11
-- [.NET 10 SDK or runtime](https://dotnet.microsoft.com/download)
-- .NET 10 Windows Desktop Runtime
+- [.NET 10 SDK or Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0): the SDK is required to build from source; the Desktop Runtime alone is sufficient for a portable release
 - An OpenAI API key
+
+### Run a portable release
+
+1. Download the `RDPilot-*-win-x64-portable.zip` archive from the
+   [latest release](https://github.com/carpptn/RDPilot/releases/latest).
+2. Extract the archive to a writable directory.
+3. Set your API key and start RDPilot:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+.\RDPilot.exe
+```
 
 ### Run from source
 
@@ -282,7 +294,7 @@ Run the deterministic self-test suite without desktop interaction or an API key:
 dotnet run --project .\RDPilot.SelfTests\RDPilot.SelfTests.csproj -c Release
 ```
 
-The current suite contains 69 tests covering action validation, coordinate
+The current suite contains 71 tests covering action validation, coordinate
 mapping, multi-monitor behavior, prompt history, streaming responses, adaptive
 observation, gestures, finite and continuous goals, loop detection, recovery
 memory, telemetry, replay, retention, concurrency, and corruption recovery.
@@ -313,13 +325,15 @@ modal dialogs can all affect results.
 - [Testing and offline diagnostics](docs/technical-reference.md#testing-and-diagnostics)
 - [Runtime and observation profiles](docs/technical-reference.md#runtime-and-observation-profiles)
 - [Safety, limitations, and disclaimer](docs/technical-reference.md#safety-limitations--disclaimer)
+- [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Project roadmap](ROADMAP.md)
 
 ## Contributing
 
-Issues and pull requests are welcome. When reporting a failure, include the goal,
-relevant log excerpt, application context, and sanitized screenshots or replay
-artifacts when possible. Never publish API keys, credentials, private documents,
-or unredacted sensitive logs.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+the development workflow, testing requirements, and guidance for safely sharing
+diagnostic artifacts.
 
 ## License
 
