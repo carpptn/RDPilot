@@ -7,6 +7,8 @@ typeof(RDPilotApplication)
 
 var tests = new (string Name, Action Run)[]
 {
+    ("appsettings.json covers every JSON setting and matches code defaults", TestShippedAppSettingsDefaults),
+    ("automatic config loading prefers working-directory appsettings.json", TestAutomaticConfigLoading),
     ("malformed pointer actions are captured without throwing", TestMalformedActionCapture),
     ("invalid bounding boxes are rejected", TestInvalidBoundingBox),
     ("out-of-range coordinates are rejected", TestCoordinateBounds),
@@ -16,7 +18,7 @@ var tests = new (string Name, Action Run)[]
     ("continuous goals cannot emit done", TestContinuousActionSchema),
     ("prompt history persists, deduplicates, and navigates", TestPromptHistory),
     ("batch CLI parses one-shot tasks and stable exit codes", TestBatchCliParsing),
-    ("rdpilot.json exposes advanced Program tuning", TestAdvancedJsonTuning),
+    ("JSON config exposes advanced Program tuning", TestAdvancedJsonTuning),
     ("gesture actions are exposed by the control schema", TestGestureActionSchema),
     ("action policies distinguish terminal and realtime input", TestActionPolicyResolution),
     ("drag paths are validated and mapped", TestDragPathMapping),
@@ -893,6 +895,138 @@ static void TestBatchCliParsing()
     }
 }
 
+static void TestShippedAppSettingsDefaults()
+{
+    const int expectedPropertyCount = 145;
+    var configPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+    Assert(File.Exists(configPath), "appsettings.json was not copied beside the self-test executable");
+
+    using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(configPath));
+    var properties = document.RootElement.EnumerateObject().ToArray();
+    var propertyNames = properties.Select(property => property.Name).ToArray();
+    Assert(properties.Length == expectedPropertyCount,
+        $"appsettings.json exposes {properties.Length} properties instead of {expectedPropertyCount}");
+    Assert(propertyNames.Distinct(StringComparer.Ordinal).Count() == expectedPropertyCount,
+        "appsettings.json contains duplicate property names");
+
+    var expectedNullProperties = new[]
+    {
+        "loopReplayCorpusPath",
+        "qaModel",
+        "qaReasoningEffort",
+        "recoveryMemoryArchivePath",
+        "recoveryMemoryPath",
+        "verifyModel"
+    };
+    var actualNullProperties = properties
+        .Where(property => property.Value.ValueKind == System.Text.Json.JsonValueKind.Null)
+        .Select(property => property.Name)
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    Assert(actualNullProperties.SequenceEqual(expectedNullProperties, StringComparer.Ordinal),
+        "appsettings.json null defaults do not match nullable code defaults");
+
+    var root = typeof(RDPilotApplication);
+    var fields = root
+        .GetFields(BindingFlags.Static | BindingFlags.NonPublic)
+        .Where(field => !field.IsLiteral &&
+                        !field.IsInitOnly &&
+                        IsComparableScalar(field.FieldType))
+        .ToArray();
+    var originalValues = fields.ToDictionary(field => field, field => field.GetValue(null));
+    var recoveryMemoryField = root.GetField(
+        "RecoveryMemoryEnabled",
+        BindingFlags.Static | BindingFlags.NonPublic)!;
+
+    try
+    {
+        // The test harness disables recovery memory before running tests. Restore
+        // its code default while validating the shipped default configuration.
+        recoveryMemoryField.SetValue(null, true);
+        var expectedValues = fields.ToDictionary(field => field, field => field.GetValue(null));
+
+        RDPilotApplication.ConfigurationService.ApplyConfigFile(configPath);
+
+        foreach (var field in fields)
+        {
+            // Loading a concrete control effort intentionally records that the
+            // value came from configuration. The effective value remains equal.
+            if (field.Name == "ReasoningEffortExplicit")
+                continue;
+
+            var actual = field.GetValue(null);
+            var expected = expectedValues[field];
+            Assert(Equals(actual, expected),
+                $"appsettings.json default changed {field.Name}: expected '{expected}', got '{actual}'");
+        }
+    }
+    finally
+    {
+        foreach (var pair in originalValues)
+            pair.Key.SetValue(null, pair.Value);
+    }
+
+    static bool IsComparableScalar(Type type) =>
+        type.IsPrimitive ||
+        type.IsEnum ||
+        type == typeof(string) ||
+        type == typeof(decimal);
+}
+
+static void TestAutomaticConfigLoading()
+{
+    var modelField = typeof(RDPilotApplication).GetField(
+        "Model",
+        BindingFlags.Static | BindingFlags.NonPublic)!;
+    var originalModel = modelField.GetValue(null);
+    var tempRoot = Path.Combine(
+        Path.GetTempPath(),
+        "RDPilotSelfTests",
+        Guid.NewGuid().ToString("N"));
+    var baseDirectory = Path.Combine(tempRoot, "base");
+    var currentDirectory = Path.Combine(tempRoot, "cwd");
+    Directory.CreateDirectory(baseDirectory);
+    Directory.CreateDirectory(currentDirectory);
+
+    var baseAppSettings = Path.Combine(baseDirectory, "appsettings.json");
+    var cwdAppSettings = Path.Combine(currentDirectory, "appsettings.json");
+    File.WriteAllText(baseAppSettings, """{"model":"base-appsettings"}""");
+    File.WriteAllText(cwdAppSettings, """{"model":"cwd-appsettings"}""");
+
+    try
+    {
+        var path = RDPilotApplication.ConfigurationService.ResolveAutomaticConfigPath(
+            baseDirectory,
+            currentDirectory);
+        Assert(path == cwdAppSettings,
+            "automatic config paths did not prefer the working-directory appsettings file");
+
+        RDPilotApplication.ConfigurationService.ApplyAutomaticConfigFile(
+            baseDirectory,
+            currentDirectory);
+        Assert((string?)modelField.GetValue(null) == "cwd-appsettings",
+            "working-directory appsettings.json was not loaded");
+
+        File.Delete(cwdAppSettings);
+        path = RDPilotApplication.ConfigurationService.ResolveAutomaticConfigPath(
+            baseDirectory,
+            currentDirectory);
+        Assert(path == baseAppSettings,
+            "automatic config path did not fall back to the executable-directory file");
+
+        RDPilotApplication.ConfigurationService.ApplyAutomaticConfigFile(
+            baseDirectory,
+            currentDirectory);
+        Assert((string?)modelField.GetValue(null) == "base-appsettings",
+            "executable-directory appsettings.json was not loaded");
+    }
+    finally
+    {
+        modelField.SetValue(null, originalModel);
+        Directory.Delete(tempRoot, recursive: true);
+    }
+}
+
 static void TestAdvancedJsonTuning()
 {
     var root = typeof(RDPilotApplication);
@@ -932,7 +1066,7 @@ static void TestAdvancedJsonTuning()
         "RDPilotSelfTests",
         Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(tempRoot);
-    var configPath = Path.Combine(tempRoot, "rdpilot.json");
+    var configPath = Path.Combine(tempRoot, "appsettings.json");
     File.WriteAllText(
         configPath,
         """
@@ -974,11 +1108,11 @@ static void TestAdvancedJsonTuning()
             if (pair.Value is double expectedDouble)
             {
                 Assert(actual is double actualDouble && Math.Abs(actualDouble - expectedDouble) < 0.000001,
-                    $"rdpilot.json did not apply {pair.Key}");
+                    $"appsettings.json did not apply {pair.Key}");
             }
             else
             {
-                Assert(Equals(actual, pair.Value), $"rdpilot.json did not apply {pair.Key}");
+                Assert(Equals(actual, pair.Value), $"appsettings.json did not apply {pair.Key}");
             }
         }
     }

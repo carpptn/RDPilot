@@ -45,6 +45,7 @@
             internal static void ApplyEnvironmentConfig()
             {
                 ApplyProfile(RunProfile);
+                ApplyAutomaticConfigFile();
                 ApplyConfigFile(Environment.GetEnvironmentVariable("RDPILOT_CONFIG"));
                 ApplyEnvironmentProfileOverrides();
         
@@ -1217,16 +1218,31 @@
                 return false;
             }
         
-            internal static void ApplyConfigFile(string? explicitPath)
+            internal static string? ResolveAutomaticConfigPath(
+                string baseDirectory,
+                string currentDirectory)
             {
-                var path = explicitPath;
-                if (string.IsNullOrWhiteSpace(path))
-                {
-                    var local = Path.Combine(AppContext.BaseDirectory, "rdpilot.json");
-                    var cwd = Path.Combine(Environment.CurrentDirectory, "rdpilot.json");
-                    path = File.Exists(cwd) ? cwd : File.Exists(local) ? local : null;
-                }
-        
+                var cwdPath = Path.Combine(currentDirectory, "appsettings.json");
+                var localPath = Path.Combine(baseDirectory, "appsettings.json");
+                return File.Exists(cwdPath)
+                    ? cwdPath
+                    : File.Exists(localPath)
+                        ? localPath
+                        : null;
+            }
+
+            internal static void ApplyAutomaticConfigFile(
+                string? baseDirectory = null,
+                string? currentDirectory = null)
+            {
+                var path = ResolveAutomaticConfigPath(
+                    baseDirectory ?? AppContext.BaseDirectory,
+                    currentDirectory ?? Environment.CurrentDirectory);
+                ApplyConfigFile(path);
+            }
+
+            internal static void ApplyConfigFile(string? path)
+            {
                 if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
                     return;
         

@@ -69,6 +69,12 @@ $env:OPENAI_API_KEY = "sk-..."
 dotnet run --project .\RDPilot
 ```
 
+All 145 runtime settings are available in
+[`RDPilot/appsettings.json`](RDPilot/appsettings.json). The file is copied next
+to `RDPilot.exe` during build and publish, so users can change normal runtime
+configuration without editing code or defining environment variables. Keep the
+API key in `OPENAI_API_KEY`; it is intentionally not stored in the JSON file.
+
 Enter a goal at the interactive prompt:
 
 ```text
@@ -226,8 +232,10 @@ Common options:
 | Enable local command execution | `--allow-run-command` |
 | Set the control-step limit | `--max-steps <n>` |
 
-Configuration is applied in this order: code defaults, `rdpilot.json`,
-environment variables, and CLI flags.
+Configuration is applied in this order: code defaults, `appsettings.json`, a
+file selected with `RDPILOT_CONFIG`, environment variables, and CLI flags. An
+`appsettings.json` file in the working directory is preferred over the copy next
+to the executable.
 
 See the [complete technical reference](docs/technical-reference.md) for every
 environment variable, CLI flag, JSON setting, runtime profile, diagnostic mode,
@@ -300,6 +308,7 @@ modal dialogs can all affect results.
 
 ## Documentation
 
+- [Default application settings](RDPilot/appsettings.json)
 - [Complete configuration and command reference](docs/technical-reference.md)
 - [Testing and offline diagnostics](docs/technical-reference.md#testing-and-diagnostics)
 - [Runtime and observation profiles](docs/technical-reference.md#runtime-and-observation-profiles)

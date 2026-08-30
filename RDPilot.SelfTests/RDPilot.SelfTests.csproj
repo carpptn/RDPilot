@@ -8,5 +8,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RDPilot\RDPilot.csproj" />
+    <None Include="..\RDPilot\appsettings.json"
+          Link="appsettings.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

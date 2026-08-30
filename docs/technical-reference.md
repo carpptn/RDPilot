@@ -22,7 +22,7 @@
 * [Quick start](#quick-start)
 * [Interactive and batch usage](#interactive-and-batch-usage)
 * [Configuration reference](#configuration-reference)
-* [`rdpilot.json`](#rdpilotjson)
+* [`appsettings.json`](#appsettingsjson)
 * [Runtime and observation profiles](#runtime-and-observation-profiles)
 * [Testing and diagnostics](#testing-and-diagnostics)
 * [Examples](#examples)
@@ -184,7 +184,7 @@ Get-Content .\task.txt -Raw | RDPilot.exe --task-file -
 
 ## Configuration reference
 
-Configuration is applied in this order: code defaults, `rdpilot.json`, environment variables, and finally CLI flags. Profile flags provide a base, while explicit settings override the selected profile regardless of argument order.
+Configuration is applied in this order: code defaults, `appsettings.json`, an explicit file from `RDPILOT_CONFIG`, environment variables, and finally CLI flags. Profile flags provide a base, while explicit settings override the selected profile regardless of argument order.
 
 `web_search` is disabled by default. Enable it per run with `--allow-web-search`, `ALLOW_WEB_SEARCH=1`, or `"allowWebSearch": true`. When the model actually invokes it, the console and run log contain explicit `[web]` entries. It is available to control and `/ask` calls, but not to verifiers.
 
@@ -306,11 +306,17 @@ Configuration is applied in this order: code defaults, `rdpilot.json`, environme
 
 ---
 
-## `rdpilot.json`
+## `appsettings.json`
 
-RDPilot also reads `rdpilot.json` from the working directory or executable directory. Environment variables and CLI flags override it. Profile flags are applied as a base first, so explicit CLI settings such as `--history-chars` or `--uia-scan-ms` override the selected profile regardless of argument order.
+The tracked [`RDPilot/appsettings.json`](../RDPilot/appsettings.json) contains all 145 supported JSON settings initialized to their code defaults. It is copied next to `RDPilot.exe` during build and publish. Edit that copy to change normal runtime behavior without rebuilding the application.
 
-Complete example (all 145 supported properties; values are illustrative and may override profile defaults):
+RDPilot prefers an `appsettings.json` file in the working directory over the copy next to the executable. A file selected with `RDPILOT_CONFIG` is loaded after the automatic `appsettings.json`. Environment variables and CLI flags have higher precedence.
+
+Nullable path and model properties use `null` when the code derives an effective default or falls back to another configured model. The OpenAI API key is intentionally excluded from JSON configuration; keep it in `OPENAI_API_KEY` or enter it interactively.
+
+Profile flags are applied as a base first, so explicit CLI settings such as `--history-chars` or `--uia-scan-ms` override the selected profile regardless of argument order.
+
+Full property example (values are illustrative and may override the shipped defaults):
 
 Internal run counters, temporary command state, and derived flags are intentionally not configuration settings.
 
