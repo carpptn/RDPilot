@@ -65,7 +65,12 @@ feed verified failures back into the next decision.
 1. Download the `RDPilot-*-win-x64-portable.zip` archive from the
    [latest release](https://github.com/carpptn/RDPilot/releases/latest).
 2. Extract the archive to a writable directory.
-3. Set your API key and start RDPilot:
+3. Double-click `RDPilot.exe`. If `OPENAI_API_KEY` is not configured, RDPilot
+   will ask you to paste your API key for the current session. You can create a
+   key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+
+Alternatively, open PowerShell in the extracted directory and provide the key
+before starting RDPilot:
 
 ```powershell
 $env:OPENAI_API_KEY = "sk-..."
