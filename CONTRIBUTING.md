@@ -58,3 +58,22 @@ Before opening a pull request:
 
 By contributing, you agree that your contribution is licensed under the
 repository's [GNU AGPL v3 license](LICENSE.txt).
+
+## Creating a release
+
+Maintainers can test release packaging without publishing from
+**Actions → Release → Run workflow**. The dry run validates the build and
+self-tests, creates the portable ZIP, and retains it as a workflow artifact for
+seven days.
+
+To publish a release, create and push a SemVer-style tag from a verified commit:
+
+```powershell
+git tag -a v0.2.0 -m "RDPilot v0.2.0"
+git push origin v0.2.0
+```
+
+The release workflow verifies the solution, creates the `win-x64` portable ZIP,
+checks its required contents, calculates its SHA-256 digest, and publishes a
+GitHub Release with generated release notes. Prerelease tags such as
+`v0.2.0-beta.1` are automatically marked as prereleases.

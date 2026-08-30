@@ -1,0 +1,167 @@
+﻿name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used for a packaging-only dry run
+        required: true
+        default: "v0.0.0-test"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify build and self-tests
+    uses: ./.github/workflows/ci.yml
+
+  package-and-release:
+    name: Package and release
+    needs: verify
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate version
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: |
+          $releaseTag = $env:REQUESTED_VERSION
+          if ($releaseTag -notmatch '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "The release tag must use a SemVer-like format such as v0.2.0 or v0.2.0-beta.1."
+          }
+
+          $version = $Matches.version
+          $packageName = "RDPilot-$releaseTag-win-x64-portable"
+          $isPrerelease = ($version.Contains('-')).ToString().ToLowerInvariant()
+
+          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
+          "VERSION=$version" >> $env:GITHUB_ENV
+          "PACKAGE_NAME=$packageName" >> $env:GITHUB_ENV
+          "IS_PRERELEASE=$isPrerelease" >> $env:GITHUB_ENV
+
+      - name: Restore win-x64 dependencies
+        run: dotnet restore .\RDPilot\RDPilot.csproj -r win-x64
+
+      - name: Publish portable application
+        shell: pwsh
+        run: |
+          $publishDirectory = Join-Path $env:RUNNER_TEMP $env:PACKAGE_NAME
+          $archivePath = "$publishDirectory.zip"
+
+          dotnet publish .\RDPilot\RDPilot.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            --no-restore `
+            -p:Version=$env:VERSION `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -o $publishDirectory
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed with exit code $LASTEXITCODE."
+          }
+
+          Copy-Item .\README.md $publishDirectory
+          Copy-Item .\LICENSE.txt $publishDirectory
+          Compress-Archive `
+            -Path (Join-Path $publishDirectory '*') `
+            -DestinationPath $archivePath `
+            -CompressionLevel Optimal
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
+          try {
+            $entries = @($archive.Entries | ForEach-Object FullName)
+            $requiredEntries = @(
+              'RDPilot.exe',
+              'RDPilot.dll',
+              'RDPilot.runtimeconfig.json',
+              'appsettings.json',
+              'README.md',
+              'LICENSE.txt'
+            )
+            $missingEntries = @($requiredEntries | Where-Object { $_ -notin $entries })
+            if ($missingEntries.Count -gt 0) {
+              throw "Release archive is missing: $($missingEntries -join ', ')."
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+          $sha256 = (Get-FileHash -Algorithm SHA256 $archivePath).Hash.ToLowerInvariant()
+          "ARCHIVE_PATH=$archivePath" >> $env:GITHUB_ENV
+          "SHA256=$sha256" >> $env:GITHUB_ENV
+
+          Write-Host "Created $archivePath"
+          Write-Host "SHA-256: $sha256"
+
+      - name: Upload dry-run package
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: ${{ env.ARCHIVE_PATH }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @(
+            '### Download and run',
+            '',
+            "1. Download ``$env:PACKAGE_NAME.zip``.",
+            '2. Install the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0).',
+            '3. Extract the ZIP to a writable directory.',
+            '4. Double-click `RDPilot.exe`. If `OPENAI_API_KEY` is not configured, RDPilot will ask you to paste your API key for the current session.',
+            '',
+            'Create an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).',
+            '',
+            "SHA-256: ``$env:SHA256``",
+            '',
+            '> RDPilot controls the real mouse and keyboard. Start in a disposable VM or non-critical environment and press **Ctrl+Alt+Q** to abort a run.'
+          ) -join "`n"
+
+          $arguments = @(
+            'release', 'create', $env:RELEASE_TAG, $env:ARCHIVE_PATH,
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--verify-tag',
+            '--fail-on-no-commits',
+            '--generate-notes',
+            '--title', "RDPilot $env:RELEASE_TAG",
+            '--notes', $notes
+          )
+
+          if ($env:IS_PRERELEASE -eq 'true') {
+            $arguments += @('--prerelease', '--latest=false')
+          }
+          else {
+            $arguments += '--latest'
+          }
+
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release creation failed with exit code $LASTEXITCODE."
+          }
