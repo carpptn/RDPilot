@@ -4,13 +4,13 @@
 internal static partial class RDPilotApplication
 {
     // === CONFIG ===
-    const string DefaultModel = "gpt-5.6-luna";                 // e.g., gpt-4o-mini, gpt-4o, gpt-5
+    const string DefaultModel = "gpt-6.1-terra";                 // e.g., gpt-4o-mini, gpt-4o, gpt-5
     static string Model = DefaultModel;
-    static string? ReasoningEffort = "max";                  // null = API/model default; e.g., low, medium, high, xhigh, max
+    static string? ReasoningEffort = "high";                  // null = API/model default; e.g., low, medium, high, xhigh, max
     static bool ReasoningEffortExplicit = false;
     static string? QaReasoningEffort = null;
     static bool QaReasoningEffortExplicit = false;
-    static string? VerifyReasoningEffort = "max";
+    static string? VerifyReasoningEffort = "high";
     static bool VerifyReasoningEffortExplicit = true;
     static string? QaModel = null;
     static string? VerifyModel = null;

@@ -3538,8 +3538,8 @@ static void TestCustomProfileReset()
     RDPilotApplication.ConfigurationService.ApplyProfile("custom");
     var root = typeof(RDPilotApplication);
     Assert(GetStatic<string>(root, "RunProfile") == "custom", "profile name did not reset");
-    Assert(GetStatic<string?>(root, "ReasoningEffort") == "max", "reasoning did not reset to the max code default");
-    Assert(GetStatic<string?>(root, "VerifyReasoningEffort") == "max", "verifier reasoning did not reset to the max code default");
+    Assert(GetStatic<string?>(root, "ReasoningEffort") == "high", "reasoning did not reset to the high code default");
+    Assert(GetStatic<string?>(root, "VerifyReasoningEffort") == "high", "verifier reasoning did not reset to the high code default");
     Assert(GetStatic<int>(root, "MaxStagnationStepsBeforeAbort") == 20, "stagnation default did not reset");
     Assert(GetStatic<int>(root, "RecoveryMemoryMaxLessons") == 500, "recovery-memory active default changed");
     Assert(GetStatic<int>(root, "RecoveryMemoryMaxQuarantinedLessons") == 500, "recovery-memory quarantine default changed");
@@ -3583,11 +3583,11 @@ static void TestProfilesPreserveStrongEffort()
         explicitField.SetValue(null, false);
         RDPilotApplication.ConfigurationService.ApplyProfile("custom");
         RDPilotApplication.ConfigurationService.ApplyProfile("fast");
-        Assert(GetStatic<string?>(root, "ReasoningEffort") == "max", "fast profile lowered max reasoning effort");
+        Assert(GetStatic<string?>(root, "ReasoningEffort") == "high", "fast profile lowered high reasoning effort");
         Assert(GetStatic<int>(root, "MaxOutputTokens") >= 10000, "fast profile lowered the max reasoning budget");
-        Assert((string?)InvokePrivate(typeof(RDPilotApplication.ConfigurationService), "EffectiveQaReasoningEffort") == "max", "fast profile lowered QA reasoning effort");
+        Assert((string?)InvokePrivate(typeof(RDPilotApplication.ConfigurationService), "EffectiveQaReasoningEffort") == "high", "fast profile lowered QA reasoning effort");
         Assert(GetStatic<int>(root, "QaMaxOutputTokens") >= 4000, "fast profile lowered the QA reasoning budget");
-        Assert((string?)InvokePrivate(typeof(RDPilotApplication.ConfigurationService), "EffectiveVerifyReasoningEffort") == "max", "fast profile lowered verifier reasoning effort");
+        Assert((string?)InvokePrivate(typeof(RDPilotApplication.ConfigurationService), "EffectiveVerifyReasoningEffort") == "high", "fast profile lowered verifier reasoning effort");
         Assert(GetStatic<int>(root, "VerifyMaxOutputTokens") >= 6000, "fast profile lowered the verifier reasoning budget");
         Assert(GetStatic<int>(root, "TurnReanalysisMaxOutputTokens") >= 10000,
             "fast profile lowered the salient reanalysis budget");
