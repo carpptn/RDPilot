@@ -1012,7 +1012,8 @@
             }
         
             internal static bool SupportsTemperature(string modelName) =>
-                !(modelName?.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase) ?? false);
+                !(modelName?.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase) ?? false)
+                && !(modelName?.StartsWith("gpt-6", StringComparison.OrdinalIgnoreCase) ?? false);
         
             internal static bool SupportsReasoningEffort(string modelName) =>
                 (modelName?.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase) ?? false)

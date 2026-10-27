@@ -26,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ("control responses expose an explicit bounded action sequence", TestControlActionBatchSchema),
     ("control streaming accepts the first complete action sequence", TestControlActionStreaming),
     ("web search is opt-in and its calls are counted once", TestWebSearchIntegration),
+    ("temperature is omitted for GPT-5 and GPT-6 models", TestTemperatureSupport),
     ("control requests use persisted reasoning and high-threshold compaction", TestControlContextRequestOptions),
     ("control context chains restart safely and remain isolated", TestControlContextChainLifecycle),
     ("invalid response state falls back without losing request context", TestControlContextFallback),
@@ -1122,6 +1123,16 @@ static void TestAdvancedJsonTuning()
             fields[pair.Key].SetValue(null, pair.Value);
         Directory.Delete(tempRoot, recursive: true);
     }
+}
+
+static void TestTemperatureSupport()
+{
+    foreach (var model in new[] { "gpt-5.6-luna", "gpt-6.1-terra", "GPT-6.1-TERRA" })
+        Assert(!RDPilotApplication.PromptAndRequestFactory.SupportsTemperature(model),
+            $"{model} must omit temperature");
+
+    Assert(RDPilotApplication.PromptAndRequestFactory.SupportsTemperature("gpt-4.1"),
+        "temperature support for older models changed");
 }
 
 static void TestControlContextRequestOptions()
