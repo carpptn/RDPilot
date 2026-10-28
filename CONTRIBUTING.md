@@ -32,6 +32,53 @@ When changing runtime behavior, add or update a deterministic self-test whenever
 practical. Keep changes scoped, preserve nullable-reference-type safety, and
 avoid unrelated formatting changes.
 
+## Source layout and test boundaries
+
+Source folders map directly to namespaces (`RDPilot.Control`,
+`RDPilot.Observation`, and so on):
+
+| Folder | Responsibility |
+| --- | --- |
+| `Configuration` | Typed `AppOptions`, profiles, environment and CLI settings |
+| `Runtime` | Per-run `RunContext`, counters and the time provider |
+| `Control` | Loop coordination, observation/decision/execution/completion stages, policies and batching |
+| `Observation` | Screenshot preparation, image comparison and adaptive observation |
+| `Desktop` | Native input, screen capture, console and UI Automation |
+| `OpenAI` | Request construction, response parsing and HTTP transport |
+| `Persistence` | Recovery memory, prompt history and atomic text storage |
+| `Diagnostics` | Run logs, request artifacts, replay and analysis |
+| `Models` | Shared request/response and domain data types |
+| `Properties` | Assembly metadata |
+
+`Program.cs` owns application startup. `ControlLoopService.RunOnce` coordinates
+four stages; `ControlRunState` and `ControlStepState` carry state between them.
+Run state is initialized by its constructor; step values that require an earlier
+stage have guarded accessors. A `ControlDecision` owns its action and follow-up
+queue for one step. `BatchPlanner` applies batching and directional policies;
+`ControlActionOutcome` accounts for success, failure, and cancellation across
+single and grouped actions through `ActionExecutionRecord`, including their own frame and semantic context baselines. `TurnStateStore` owns bounded visual prototypes, navigation positions and edges. `RecoveryStoreFormat` checks versions before payload deserialization; `RecoveryStoreReader` and `RecoveryStoreNormalizer` then validate and migrate supported stores, distinguishing missing, unreadable and unsupported files. Replay version 2 records the live detector's bounded execution history and optional content-free features from `LoopSemanticClassifier`. `TurnVisualAnalysis` owns pure color sampling and pixel change metrics. Follow-ups never live in `RunContext`.
+Only values used by more than one stage belong in step state. Helper policies
+live in `ControlActionPolicy`, `ControlGoalPolicy`, `ControlLoopGuards`, and
+`ControlHistory`. A run snapshots its configuration, restores the prior context
+on disposal, and rejects overlapping runs because the console and desktop are
+process-wide resources.
+
+Self-tests are grouped into `Behavior`, `Regression`, `Integration`, and
+`Support`. Regression tests replace HTTP, native input (including cursor movement and clipboard writes), and screen capture with
+in-memory responses, recorded events, and synthetic pixels. `RuntimeClock`
+accepts a `TimeProvider`; `AtomicTextStore` exposes file operations for injected
+I/O failures. Tests restore substituted dependencies in `finally` blocks.
+
+The default suite makes no API calls and sends no desktop input. A separate,
+explicit smoke test uses the existing `OPENAI_API_KEY` and sends a generated
+image to the configured default model; this incurs API usage:
+
+```powershell
+dotnet run --project .\RDPilot.SelfTests\RDPilot.SelfTests.csproj -c Release -- --live-api-smoke
+```
+
+Save source and documentation as UTF-8 with BOM and CRLF line endings.
+
 ## Reporting agent failures
 
 Include enough context to reproduce the behavior:

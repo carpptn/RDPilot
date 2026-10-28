@@ -1,0 +1,13 @@
+﻿global using RDPilot.Configuration;
+global using RDPilot.Control;
+global using RDPilot.Desktop;
+global using RDPilot.Diagnostics;
+global using RDPilot.Models;
+global using RDPilot.Observation;
+global using RDPilot.OpenAI;
+global using RDPilot.Persistence;
+global using RDPilot;
+global using RDPilot.Runtime;
+global using RDPilot.SelfTests.Behavior;
+global using RDPilot.SelfTests.Regression;
+global using RDPilot.SelfTests.Support;
