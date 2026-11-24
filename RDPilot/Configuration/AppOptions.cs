@@ -4,7 +4,7 @@ namespace RDPilot.Configuration;
 /// <summary>Typed application settings; runtime counters and queues live in RunContext.</summary>
 internal sealed class AppOptions
 {
-    internal const string DefaultModel = "gpt-6.1-terra";
+    internal const string DefaultModel = "gpt-6.2-sol";
     internal const int MaxStepsDefault = 10000;
     internal string Model = DefaultModel;
     internal string? ReasoningEffort = "high";                  // null = API/model default; e.g., low, medium, high, xhigh, max
